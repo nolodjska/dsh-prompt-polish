@@ -1,0 +1,127 @@
+# prompt-polish 内部协议与实现说明
+
+面向维护者。用户向的说明见 [README](../README.md)。
+
+## 1. 组成
+
+| 半边 | 文件 | 运行位置 | 职责 |
+| --- | --- | --- | --- |
+| Host | `index.js` | Harness 主进程 | 注册一条精确 Fetch 路由，校验请求信封，把结果包成 JSON |
+| Host | `optimize.js` | Harness 主进程 | 解析会话路由、采集上下文与附件、发一次 `llm` 调用、净化输出 |
+| Client | `client.js` | 浏览器 | 注册按钮与骨架屏两个槽位，发请求、写回草稿、提供撤回 |
+
+客户端不能 import 任何 Harness Client 包，因此两侧只通过下面这条 HTTP 契约通信。
+
+## 2. 线协议
+
+### 路由
+
+```
+POST /api/prompt-polish/optimize      requestBody: buffered
+```
+
+走 Harness 的共享 `/api` 桥（与 Web GUI 同源，靠浏览器会话 cookie 认证），Host 侧用
+`ctx.connection.fetch.register({ path, methods: ['POST'], requestBody: 'buffered' })` 注册。
+插件没有 Typert `/remote` 代码生成，所以精确 Fetch 路由是普通插件唯一可用的同源通道。
+
+### 请求体
+
+```jsonc
+{
+  "sessionId": "session-7",
+  "text": "输入框里的草稿纯文本",
+  "attachments": [                       // 可能缺省或为 []
+    { "type": "image", "mediaType": "image/png", "data": "<规范 base64，无 data: 前缀>", "name": "image.png" },
+    { "type": "file",  "receiptId": "<FileUploadReceiptId>", "name": "notes.md", "bytes": 1234 }
+  ]
+}
+```
+
+- `type:"image"` 的 `data` 由 Composer 自己的 `encodeImage` 产出；`mediaType` 限于
+  `image/png|jpeg|webp|gif`。
+- `type:"file"` 的 `receiptId` 来自后台文件上传队列，与用户此时点发送会提交的是同一个 id。
+- 所有字段都视为不可信输入。
+
+### 响应体（两种结果都是 HTTP 200）
+
+```jsonc
+{ "ok": true,  "text": "<改写后的提示词>", "model": "<模型 id>" }
+{ "ok": false, "message": "<中文失败原因>" }
+```
+
+只有信封本身非法（非 JSON、缺 `sessionId`）才返回 400。
+
+## 3. 上下文从哪来
+
+改写请求带三类上下文，全部只读：
+
+1. **模型路由**：`ctx.sessions.get(sessionId).requestHeader().config` —— 会话日志里最后一条
+   请求记录里的 `provider`/`model`。没有记录时直接失败，绝不猜一个默认模型。
+2. **对话历史**：`session.deriveMessages()` 里最近 6 条 user/assistant 消息，只取文本块，
+   单条 1500 字符、合计 6000 字符（从最新往回占预算），`JSON.stringify` 后放进用户消息，
+   用 JSON 边界防止草稿伪造分隔符。
+3. **输入框附件**：
+   - 图片经 `ctx.attachments.admitPromptContent()` 拿到持久引用，仅当
+     `PreparedLlmCall.inputModalities` 明确含 `'image'` 时作为 `{type:'image', attachment}`
+     块随请求发出；否则只在清单里描述名称与尺寸。
+   - 文本类文件经 `ctx.fileUploads.resolve(agent, receiptId)` →
+     `ctx.attachments.readFileStream()` 读前 8 KB，合计上限 24 KB。
+   - 其他文件只给名称与字节数。
+   - 无论能否读到正文，都会生成一段「附件清单」，逐项说明模型是否真的看得见内容。
+
+## 4. 一次调用
+
+```
+prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配器默认值
+  → 展开 call.config 原样传给 call.stream({ ...call.config, messages, system, sessionId, signal })
+  → 消费 text-delta 累积文本，记录终止 finish
+  → sanitizeOutput: 去掉整体代码围栏 / 开场白行 / 整体包裹的引号，截断到 20000 字符
+```
+
+`call.stream()` 在派发前会比对 `provider/model/reasoningEffort/temperature/maxTokens`
+是否与 prepare 时一致（`INVALID_PREPARED_CALL`），所以必须展开 `call.config`，不能自己另写一份。
+`purpose` 只允许 `'compaction' | 'session-title'`，这里不传。
+
+## 5. 非模型可见性
+
+- 不 append 任何会话事件，不创建消息，不改附件，不动附件 dock。
+- 图片 admit 只是内容寻址存储写入，不产生可见消息；未被引用的对象由后续回收策略处理。
+- 附件是「读懂草稿」的背景，系统提示词明确禁止把附件内容搬进改写结果。
+
+## 6. 客户端实现要点
+
+- 注册两个槽位：`conversation.input.activity`（工具行单槽，模型选择器右边）与
+  `conversation.input.overlay`（卡片内浮层，id `prompt-polish-skeleton`）。
+- 状态按 session 存在一个不可变 store 里，由 `ctx.effect` 拥有；切会话/卸载会 abort 在途请求，
+  迟到的响应带 token 与 session 双重校验，不可能写进别的草稿。
+- 附件通过 `ctx.get('conversation').serializeDraftAttachments(ids)` 取得线格式，整批原子：
+  只要有一个文件还在上传，这一次就整体跳过附件（日志记录，不打扰用户）。
+- 骨架屏用 `[data-composer-overlay]` → `[data-composer-card]` → `[data-composer-input]`
+  量出编辑器真实矩形，`ResizeObserver`（编辑器 + 卡片）跟随，bar 数按 24px 行距由高度推导；
+  量不到时退回按草稿行数估算。
+
+## 7. 已知耦合
+
+以下三处是宿主内部实现细节，不是公开契约。宿主改名或改签名时会**降级**而不是崩溃：
+
+| 用于 | 接口 | 降级行为 |
+| --- | --- | --- |
+| 读附件字节 | `ConversationService.serializeDraftAttachments` | 本次改写不带附件 |
+| 量骨架屏高度 | `[data-composer-*]` 属性 | 退回按草稿行数估算 |
+| 图片入上下文 | `PreparedLlmCall.inputModalities` | 只给附件清单与尺寸 |
+
+## 8. 测试
+
+```bash
+node test/run-all.mjs
+```
+
+五个离线 harness，不需要 Harness 运行实例、不联网：
+
+| 文件 | 覆盖 |
+| --- | --- |
+| `client.smoke.mjs` | 模块加载、槽位注册、locale 词典、effect 数量 |
+| `client.behaviour.mjs` | 四个 UI 状态、撤回、编辑失效、会话切换、空草稿 |
+| `client.attachments.mjs` | 附件采集/上限/线格式、序列化失败降级、dock 只读审计 |
+| `client.geometry.mjs` | 骨架屏跟随编辑器矩形、bar 数随高度、无尺寸时回退 |
+| `host.optimize.mjs` | 路由解析、上下文摘要、附件、全部失败分支、超时/取消、零 append |

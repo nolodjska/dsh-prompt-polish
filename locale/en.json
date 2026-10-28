@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Prompt Polish",
+    "description": "Adds a polish button beside the composer model selector: it rewrites the draft prompt with the session's own model and context, then turns into an undo button."
+  }
+}
