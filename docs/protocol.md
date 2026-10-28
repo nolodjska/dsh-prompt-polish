@@ -109,8 +109,20 @@ prepareCall({ provider, model, reasoningEffort? }, signal)   // 绑定适配器�
 
 - 注册两个槽位：`conversation.input.activity`（工具行单槽，模型选择器右边）与
   `conversation.input.overlay`（卡片内浮层，id `prompt-polish-skeleton`）。
-- 状态按 session 存在一个不可变 store 里，由 `ctx.effect` 拥有；切会话/卸载会 abort 在途请求，
-  迟到的响应带 token 与 session 双重校验，不可能写进别的草稿。
+- 状态按 session 存在一个不可变 store 里，由 `ctx.effect` 拥有。**切会话不取消请求**：
+  请求归属发起它的那个 session，切走后继续在后台跑完；只有插件卸载（`ctx.effect` 释放）
+  才会 abort。
+- 结果写回**发起会话**：完成时只把 `{phase:'done', written, original, applied:false}` 记进
+  该 session 的条目；真正调用 `inputActions.setDraft()` 的是**该 session 自己的那个组件实例**
+  在渲染时执行的 effect。组件按 session 渲染，所以当用户在别的会话时不会有任何写入；切回来
+  的那一帧才写，且 `applied` + 同步的 `appliedRef` 双重保证只写一次。
+- 撤销判定（`seen`）声明在写入 effect **之前**：同一 commit 里两个 effect 都可能跑，判定必须
+  看到"写入之前"的草稿，否则一次重入渲染会让它误以为用户改过、把刚写好的结果丢掉。
+- 同一 session 单飞：`store.begin()` 在非 idle 时直接返回 null，所以连点、切走再切回都不会
+  重复发起或并发写入。
+- 发起会话消失（关闭/删除）：完成时用 `useSessions` 的目录快照校验
+  （`byId[id] !== undefined`，目录为空时按"仍存在"处理，宁可不丢结果），不在目录里就
+  `store.discard()` —— 静默丢弃，不写草稿、不弹错误、不影响其他 session 的状态。
 - 附件通过 `ctx.get('conversation').serializeDraftAttachments(ids)` 取得线格式，整批原子：
   只要有一个文件还在上传，这一次就整体跳过附件（日志记录，不打扰用户）。
 - 骨架屏用 `[data-composer-overlay]` → `[data-composer-card]` → `[data-composer-input]`

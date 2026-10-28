@@ -195,21 +195,30 @@ const setDraftExternal = (text) => {
   flush()
 }
 const inputActions = { setDraft: (text) => { writes.push(text); setDraftExternal(text) } }
+/**
+ * The client's Session catalog, read through `useSessions`. Deleting an id models closing
+ * or deleting that Session, which must drop any result that still arrives for it.
+ */
+const catalog = { byId: { 's-1': { blank: false }, 's-2': { blank: false }, 's-a': { blank: false }, 's-b': { blank: false }, 's-a2': { blank: false }, 's-gone': { blank: false }, 's-brand-new': { blank: true } } }
 const makeProps = (sessionId) => ({
   sessionId,
   inputActions,
   useInput: (select) => select({ draft }),
+  useSessions: (select) => select(catalog),
   t,
 })
 
 // request queue under test control
 let pendingRequest = null
+/** Every request ever issued, in order (the queue above only keeps the newest). */
+const requestLog = []
 globalThis.fetch = (url, init) => {
-  const request = { url, init }
+  const request = { url, init, settled: false }
   pendingRequest = request
+  requestLog.push(request)
   return new Promise((resolve, reject) => {
-    request.resolve = resolve
-    request.reject = reject
+    request.resolve = (value) => { request.settled = true; resolve(value) }
+    request.reject = (error) => { request.settled = true; reject(error) }
     init.signal?.addEventListener('abort', () => {
       const error = new Error('aborted')
       error.name = 'AbortError'
@@ -363,6 +372,104 @@ await tick()
 flush()
 check(writes[writes.length - 1] === '改写后的提示词', 'first message: the draft is rewritten')
 check(findButton(freshButton.tree).props['data-phase'] === 'done', 'first message: undo is offered')
+
+// ---------------------------------------------------------------------------
+// switching Sessions never interrupts a rewrite
+// ---------------------------------------------------------------------------
+const respond = (request, text) => request.resolve({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify({ ok: true, text, model: 'm' }),
+})
+
+// 1. leave mid-flight: the request keeps running, writes nothing into the Session that is
+//    open now, and lands in the Session that started it once the user comes back.
+setDraftExternal('甲会话的草稿')
+const fromA = mount(Button, makeProps('s-a'))
+findButton(fromA.tree).props.onClick()
+flush()
+const inflightA = requestLog[requestLog.length - 1]
+check(inflightA !== undefined, 'switch: one request issued for the origin Session')
+check(inflightA.init.signal.aborted === false, 'switch: the request is live when leaving')
+
+unmount(fromA) // the composer moves to another Session
+setDraftExternal('乙会话的草稿')
+const onB = mount(Button, makeProps('s-b'))
+flush()
+check(inflightA.init.signal.aborted === false, 'switch: leaving the Session does not cancel the request')
+check(findButton(onB.tree).props['data-phase'] === 'idle', 'switch: the other Session is not stuck pending')
+const writesBeforeSwitch = writes.length
+respond(inflightA, '优化后的甲草稿')
+await tick()
+flush()
+check(inflightA.settled === true, 'switch: the response was consumed while the user was away')
+check(writes.length === writesBeforeSwitch, 'switch: nothing is written into the Session that is open now')
+check(!writes.includes('优化后的甲草稿'), 'switch: the away Session does not get its draft written yet')
+check(findAll(onB.tree, (n) => n.props.className === 'pp-error').length === 0, 'switch: no error is surfaced elsewhere')
+
+// back to the origin Session: the finished result is applied now, once
+unmount(onB)
+setDraftExternal('甲会话的草稿')
+const backToA = mount(Button, makeProps('s-a'))
+flush()
+check(writes[writes.length - 1] === '优化后的甲草稿', 'switch: the result lands in the originating Session on return')
+check(writes.filter((text) => text === '优化后的甲草稿').length === 1, 'switch: written exactly once')
+check(findButton(backToA.tree).props['data-phase'] === 'done', 'switch: the control offers undo again')
+unmount(backToA)
+
+// 2. one in-flight request per Session: no duplicate dispatch, no concurrent writes
+setDraftExternal('并发草稿')
+const conc = mount(Button, makeProps('s-a2'))
+findButton(conc.tree).props.onClick()
+flush()
+const issued = requestLog.length
+findButton(conc.tree).props.onClick() // second click while in flight
+flush()
+check(requestLog.length === issued, 'concurrency: a second click while in flight issues nothing')
+unmount(conc)
+const concAgain = mount(Button, makeProps('s-a2')) // leave and come straight back
+flush()
+check(findButton(concAgain.tree).props['data-phase'] === 'pending', 'concurrency: returning shows the in-flight state')
+findButton(concAgain.tree).props.onClick()
+flush()
+check(requestLog.length === issued, 'concurrency: re-entering the Session does not re-issue')
+respond(requestLog[requestLog.length - 1], '并发改写完成')
+await tick()
+flush()
+check(writes.filter((text) => text === '并发改写完成').length === 1, 'concurrency: the single result is written once')
+unmount(concAgain)
+
+// 3. the origin Session vanished: the result is dropped silently
+setDraftExternal('即将消失的草稿')
+const doomed = mount(Button, makeProps('s-gone'))
+findButton(doomed.tree).props.onClick()
+flush()
+const inflightGone = requestLog[requestLog.length - 1]
+delete catalog.byId['s-gone'] // closed / deleted while the request was running
+unmount(doomed)
+const writesBeforeGone = writes.length
+respond(inflightGone, '不该写进去的改写')
+await tick()
+flush()
+check(writes.length === writesBeforeGone, 'gone: a deleted Session never receives the result')
+check(!writes.includes('不该写进去的改写'), 'gone: the discarded text never reached any draft')
+const resurrect = mount(Button, makeProps('s-gone'))
+flush()
+check(findButton(resurrect.tree).props['data-phase'] === 'idle', 'gone: no residual state is left behind')
+const unaffected = mount(Button, makeProps('s-b'))
+flush()
+check(findButton(unaffected.tree).props['data-phase'] === 'idle', 'gone: an unrelated Session is unaffected')
+check(findAll(unaffected.tree, (n) => n.props.className === 'pp-error').length === 0, 'gone: no error appears elsewhere')
+unmount(resurrect)
+unmount(unaffected)
+
+// Leave no request dangling: an unsettled fake request would keep the plugin's own timeout
+// timer (and therefore this process) alive now that leaving a Session no longer aborts it.
+for (const request of requestLog) {
+  if (request.settled !== true) request.reject(Object.assign(new Error('harness cleanup'), { name: 'AbortError' }))
+}
+await tick()
+flush()
 
 const failed = results.filter(([ok]) => !ok)
 console.log('\n' + (results.length - failed.length) + '/' + results.length + ' checks passed')

@@ -238,8 +238,8 @@ globalThis.fetch = (url, init) => {
   request.body = init && init.body ? JSON.parse(init.body) : null
   requests.push(request)
   return new Promise((resolve, reject) => {
-    request.resolve = resolve
-    request.reject = reject
+    request.resolve = (value) => { request.settled = true; resolve(value) }
+    request.reject = (error) => { request.settled = true; reject(error) }
     init.signal?.addEventListener('abort', () => {
       const error = new Error('aborted')
       error.name = 'AbortError'
@@ -263,6 +263,12 @@ const check = (cond, msg) => {
   console.log((cond ? 'ok  - ' : 'FAIL- ') + msg)
 }
 const reset = () => {
+  // A switched-away Session no longer aborts its in-flight work, so an unresolved request
+  // left behind by the previous scenario would keep the plugin's timeout timer (and this
+  // process) alive. Settle them before dropping the reference.
+  for (const request of requests) {
+    if (request.settled !== true) request.reject(Object.assign(new Error('scenario reset'), { name: 'AbortError' }))
+  }
   serializeCalls = []
   mutatorCalls = []
   otherInputCalls.length = 0
@@ -307,7 +313,7 @@ const imageEntry = (data, name) => ({ type: 'image', mediaType: 'image/png', dat
   serializeImpl = async () => {
     throw new Error('must not be called')
   }
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-2'))
   findButton(button.tree).props.onClick()
   check(requests.length === 1, 'B: request issued synchronously (no attachment await)')
   check(serializeCalls.length === 0, 'B: serialization skipped when the dock is empty')
@@ -323,7 +329,7 @@ const imageEntry = (data, name) => ({ type: 'image', mediaType: 'image/png', dat
   reset()
   attachmentIds = Array.from({ length: 12 }, (_, i) => 'id-' + i)
   serializeImpl = async () => ({ attachments: attachmentIds.map((_v, i) => ({ type: 'file', receiptId: 'r-' + i })) })
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-3'))
   findButton(button.tree).props.onClick()
   await tick()
   check(requests[0].body.attachments.length === 8, 'C: capped at 8 attachments, got ' + requests[0].body.attachments.length)
@@ -341,7 +347,7 @@ const imageEntry = (data, name) => ({ type: 'image', mediaType: 'image/png', dat
   serializeImpl = async () => ({
     attachments: [imageEntry('A'.repeat(8_400_001)), { type: 'file', receiptId: 'kept' }],
   })
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-4'))
   findButton(button.tree).props.onClick()
   await tick()
   const body = requests[0].body
@@ -356,7 +362,7 @@ const imageEntry = (data, name) => ({ type: 'image', mediaType: 'image/png', dat
   attachmentIds = ['i1', 'i2', 'i3', 'i4', 'i5']
   const big = 'B'.repeat(8_000_000)
   serializeImpl = async () => ({ attachments: [imageEntry(big), imageEntry(big), imageEntry(big), imageEntry(big), imageEntry(big)] })
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-5'))
   findButton(button.tree).props.onClick()
   await tick()
   check(requests[0].body.attachments.length === 4, 'D: 24MB encoded cap stops the payload at 4 images, got ' + requests[0].body.attachments.length)
@@ -373,7 +379,7 @@ const imageEntry = (data, name) => ({ type: 'image', mediaType: 'image/png', dat
   serializeImpl = async () => {
     throw new Error('conversation.serializeDraftAttachments: one or more files have not finished uploading')
   }
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-6'))
   const logged = []
   const realError = console.error
   console.error = (...args) => logged.push(args.join(' '))
@@ -398,7 +404,7 @@ for (const mode of ['missing-service', 'missing-method']) {
   serializeImpl = async () => {
     throw new Error('must not be called')
   }
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-7-' + mode))
   findButton(button.tree).props.onClick()
   await tick()
   check(requests.length === 1 && !('attachments' in requests[0].body), 'F(' + mode + '): rewrite runs without attachments')
@@ -408,7 +414,7 @@ for (const mode of ['missing-service', 'missing-method']) {
   unmount(button)
 }
 
-//#region G: staleness after the await never dispatches
+//#region G: switching Sessions mid-flight neither cancels nor writes into the other draft
 {
   reset()
   attachmentIds = ['slow']
@@ -418,11 +424,19 @@ for (const mode of ['missing-service', 'missing-method']) {
   findButton(button.tree).props.onClick()
   await tick()
   check(requests.length === 0, 'G: no request before serialization settles')
-  unmount(button) // session left / component unmounted
+  // The composer moves to another Session (this component unmounts). The rewrite belongs to
+  // s-9, so it must still go out — and its result must not be written while s-9 is away.
+  unmount(button)
   gate.resolve({ attachments: [imageEntry('QUJD')] })
   await tick()
   await tick()
-  check(requests.length === 0, 'G: stale rewrite never dispatches after the await')
+  check(requests.length === 1, 'G: a switched-away Session keeps its in-flight rewrite, got ' + requests.length)
+  check(requests[0].body.sessionId === 's-9', 'G: the request still targets the originating Session')
+  check(requests[0].body.attachments.length === 1, 'G: the attachments are still sent')
+  requests[0].resolve(jsonResponse({ ok: true, text: '改写完成', model: 'm' }))
+  await tick()
+  await tick()
+  check(!writes.includes('改写完成'), 'G: nothing is written while that Session is not open')
 }
 
 //#region H: the user's dock is never mutated
@@ -430,21 +444,29 @@ for (const mode of ['missing-service', 'missing-method']) {
   reset()
   attachmentIds = ['a', 'b']
   serializeImpl = async () => ({ attachments: [imageEntry('QUJD', 'a.png'), { type: 'file', receiptId: 'r' }] })
-  const button = mount(Button, makeProps('s-1'))
+  const button = mount(Button, makeProps('s-8'))
   findButton(button.tree).props.onClick()
   await tick()
   requests[0].resolve(jsonResponse({ ok: true, text: 'done', model: 'm' }))
   await tick()
+  check(findButton(button.tree).props['data-phase'] === 'done', 'H: the write moved the control to the undo state, got ' + findButton(button.tree).props['data-phase'])
   findButton(button.tree).props.onClick() // undo
   await tick()
   check(mutatorCalls.length === 0, 'H: no conversation mutator called (' + MUTATORS.join(', ') + ')')
   check(otherInputCalls.length === 0, 'H: no InputActions mutator called')
-  check(JSON.stringify(writes) === JSON.stringify(['done', '把这段提示词改好']), 'H: only setDraft was used (rewrite + undo)')
+  check(JSON.stringify(writes) === JSON.stringify(['done', '把这段提示词改好']), 'H: only setDraft was used (rewrite + undo), got ' + JSON.stringify(writes))
   check(attachmentIds.length === 2, 'H: attachment ids untouched by the rewrite')
   unmount(button)
 }
 //#endregion
 
+// Leave no request dangling: a Session that is switched away from no longer aborts its
+// in-flight work, so an unresolved fake request would keep the plugin's timeout timer (and
+// therefore this process) alive. Settle everything before reporting.
+for (const request of requests) {
+  if (request.settled !== true) request.reject(Object.assign(new Error('harness cleanup'), { name: 'AbortError' }))
+}
+await tick()
 const failed = results.filter(([ok]) => !ok)
 console.log('\n' + (results.length - failed.length) + '/' + results.length + ' checks passed')
 if (failed.length > 0) process.exitCode = 1

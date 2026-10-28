@@ -308,8 +308,8 @@ globalThis.fetch = (url, init) => {
   const request = { url, init }
   pending.push(request)
   return new Promise((resolve, reject) => {
-    request.resolve = resolve
-    request.reject = reject
+    request.resolve = (value) => { request.settled = true; resolve(value) }
+    request.reject = (error) => { request.settled = true; reject(error) }
     init.signal?.addEventListener('abort', () => {
       const error = new Error('aborted')
       error.name = 'AbortError'
@@ -500,6 +500,14 @@ check(thrownGeometry.measured === 'false' && thrownGeometry.height > 0, 'defensi
 cardNode.querySelector = realQuery
 //#endregion
 
+// Leave no request dangling: a Session that is switched away from no longer aborts its
+// in-flight work, so an unresolved fake request would keep the plugin's timeout timer (and
+// therefore this process) alive. Settle everything before reporting.
+for (const request of pending) {
+  if (request.settled !== true) request.reject(Object.assign(new Error('harness cleanup'), { name: 'AbortError' }))
+}
+await tick()
+flush()
 const failed = results.filter(([ok]) => !ok)
 console.log('\n' + (results.length - failed.length) + '/' + results.length + ' checks passed')
 if (failed.length > 0) process.exitCode = 1

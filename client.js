@@ -152,7 +152,18 @@ window.__ModuleLoader__.load({
             written,
             token,
             controller: null,
+            // The draft is written by the component of the Session that owns this entry,
+            // once it renders — which may be later, if the user switched away meanwhile.
+            applied: false,
           })
+          notify()
+          return true
+        },
+        /** Mark the completed rewrite as written into its Session's draft. */
+        markApplied(sessionId) {
+          const live = read(sessionId)
+          if (live.phase !== 'done' || live.applied === true) return false
+          entries.set(sessionId, { ...live, applied: true })
           notify()
           return true
         },
@@ -174,8 +185,12 @@ window.__ModuleLoader__.load({
           abortOf(read(sessionId))
           drop(sessionId)
         },
-        /** Session left the page: cancel the request and forget the session's state. */
-        release(sessionId) {
+        /**
+         * The Session this entry belongs to is gone (closed, deleted, no longer in the
+         * catalog): drop it silently. No abort signal reaches the user, no error is
+         * surfaced, and no other Session's entry is touched.
+         */
+        discard(sessionId) {
           abortOf(read(sessionId))
           drop(sessionId)
         },
@@ -235,6 +250,27 @@ window.__ModuleLoader__.load({
       const ids = []
       for (const id of value) if (typeof id === 'string' && id !== '') ids.push(id)
       return ids.length === 0 ? NO_ATTACHMENT_IDS : ids
+    }
+
+    /**
+     * Whether a Session is still present in the client's Session catalog.
+     *
+     * Used only to decide whether a finished rewrite may still be written: a Session the
+     * user closed or deleted must drop its result silently instead of surfacing an error.
+     * Deliberately conservative — an unavailable or not-yet-populated catalog counts as
+     * "alive", because refusing to write a good result is worse than writing one.
+     *
+     * @param {unknown} snapshot the `useSessions` snapshot (`{ byId: {...} }`).
+     * @param {unknown} id the Session id the result belongs to.
+     * @returns {boolean} false only when the catalog is populated and the id is missing.
+     */
+    function isSessionAlive(snapshot, id) {
+      if (typeof id !== 'string' || id === '') return false
+      if (snapshot === null || typeof snapshot !== 'object') return true
+      const byId = snapshot.byId
+      if (byId === null || typeof byId !== 'object') return true
+      if (Object.keys(byId).length === 0) return true
+      return byId[id] !== undefined
     }
 
     /**
@@ -425,21 +461,27 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
       const attachmentIdsValue = props.useInput((state) => state.attachmentIds)
       const state = usePolishState(sessionId)
       const phase = state.phase
+      const written = state.written
 
       const actionsRef = React.useRef(actions)
       actionsRef.current = actions
 
-      // A session change (or an unmount) drops that session's work; a late
-      // response can never write into another session's draft.
-      React.useEffect(() => () => {
-        if (store !== null) store.release(sessionId)
-      }, [sessionId])
+      // The Session catalog: used to prove the ORIGINATING Session still exists before
+      // a result is written. Kept in a ref so the fetch closure can read the live
+      // snapshot long after the render that started the request.
+      const sessionsSnapshot = typeof props.useSessions === 'function' ? props.useSessions((snapshot) => snapshot) : undefined
+      const sessionsRef = React.useRef(sessionsSnapshot)
+      sessionsRef.current = sessionsSnapshot
 
       // While showing undo, only keep it while the composer still holds OUR
       // text. `seen` tolerates the frame between the store write and the
       // composer write, so the affordance never flickers away.
+      //
+      // Declared BEFORE the write effect on purpose: both effects can run in the same
+      // commit, and this one must judge the draft as it was before our write — otherwise a
+      // re-entrant re-render could make it believe the user had edited over us and drop a
+      // freshly written result.
       const seen = React.useRef(false)
-      const written = state.written
       React.useEffect(() => {
         if (phase !== 'done') {
           seen.current = false
@@ -451,6 +493,29 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         }
         if (seen.current && store !== null) store.dismiss(sessionId)
       }, [phase, written, draft, sessionId])
+
+      // Switching Sessions does NOT cancel anything: the request keeps running under the
+      // entry of the Session that started it, and that Session's own component writes the
+      // result whenever it is rendered again. Only plugin disposal aborts work.
+      //
+      // `appliedRef` guards the write synchronously: a render may be flushed from inside
+      // this effect, and the same completed result must never be written twice.
+      const applied = state.applied
+      const appliedRef = React.useRef(null)
+      React.useEffect(() => {
+        if (phase !== 'done' || applied === true || store === null) return
+        if (sessionId === undefined || typeof written !== 'string') return
+        if (appliedRef.current === state.token) return
+        appliedRef.current = state.token
+        const latest = actionsRef.current
+        if (latest !== null && latest !== undefined && typeof latest.setDraft === 'function') {
+          // The composer now belongs to the Session that owns this result, so this writes
+          // into the right draft — including the case where it finished while the user was
+          // looking at another Session.
+          latest.setDraft(written)
+        }
+        store.markApplied(sessionId)
+      }, [phase, applied, written, sessionId])
 
       const error = state.error
       React.useEffect(() => {
@@ -493,6 +558,11 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         const body = { sessionId, text: promptText }
         if (attachments.length > 0) body.attachments = attachments
 
+        // Everything below belongs to the Session that STARTED this request, whichever
+        // Session is open when it settles.
+        const origin = sessionId
+        const originAlive = () => isSessionAlive(sessionsRef.current, origin)
+
         let response
         let raw = ''
         try {
@@ -505,17 +575,28 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
           raw = await response.text()
         } catch (failure) {
           settle()
-          if (store === null || !store.isCurrent(sessionId, token)) return
-          if (failure !== null && failure !== undefined && failure.name === 'AbortError') {
-            if (timedOut) store.fail(sessionId, token, t('error.timeout'))
-            else store.dismiss(sessionId)
+          if (store === null || !store.isCurrent(origin, token)) return
+          if (!originAlive()) {
+            // The Session was closed/deleted while the request ran: drop it silently.
+            store.discard(origin)
             return
           }
-          store.fail(sessionId, token, t('error.network'))
+          if (failure !== null && failure !== undefined && failure.name === 'AbortError') {
+            if (timedOut) store.fail(origin, token, t('error.timeout'))
+            else store.dismiss(origin)
+            return
+          }
+          store.fail(origin, token, t('error.network'))
           return
         }
         settle()
-        if (store === null || !store.isCurrent(sessionId, token)) return
+        if (store === null || !store.isCurrent(origin, token)) return
+        // A vanished Session never gets a state entry of its own, never writes a draft and
+        // never shows an error: the result is simply discarded.
+        if (!originAlive()) {
+          store.discard(origin)
+          return
+        }
         let payload = null
         if (raw !== '') {
           try {
@@ -526,17 +607,18 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         }
         if (payload !== null && typeof payload === 'object' && payload.ok === false) {
           const message = typeof payload.message === 'string' && payload.message !== '' ? payload.message : t('error.generic')
-          store.fail(sessionId, token, message)
+          store.fail(origin, token, message)
           return
         }
         const text = payload !== null && typeof payload === 'object' && payload.ok === true && typeof payload.text === 'string' ? payload.text : ''
         if (!response.ok || text.trim() === '') {
-          store.fail(sessionId, token, t('error.generic'))
+          store.fail(origin, token, t('error.generic'))
           return
         }
-        if (!store.succeed(sessionId, token, text)) return
-        const latest = actionsRef.current
-        if (latest !== null && latest !== undefined && typeof latest.setDraft === 'function') latest.setDraft(text)
+        // Recorded against the origin Session. The write itself happens in that Session's
+        // component effect, so it lands in the right draft even when the user is elsewhere
+        // right now — and it lands exactly once.
+        store.succeed(origin, token, text)
       }
 
       /**
