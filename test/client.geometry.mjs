@@ -25,8 +25,15 @@ const fireWindow = (type) => {
 }
 
 //#region fake composer DOM
-/** The host composer under test; `editorTop`/`editorHeight` are the measured values. */
-const composer = { editorTop: 116, editorHeight: 330, railCount: 3 }
+/**
+ * The host composer under test.
+ * - `editorTop`/`editorHeight`: the Lexical root's own rect (content height, unbounded).
+ * - `scrollTop`/`visibleHeight`: the composer's scrollport
+ *   (`.GRgSLq_scroll{max-height:…;overflow-y:auto}`), which clips that content.
+ *   Both default to the editor's own values, i.e. "nothing is clipped".
+ * - `cardHeight`: the painted surface's height; defaults to a card that wraps the editor.
+ */
+const composer = { editorTop: 116, editorHeight: 330, railCount: 3, scrollTop: null, visibleHeight: null, cardHeight: null }
 
 const rect = (top, height) => ({ top, height, bottom: top + height, left: 0, right: 100, width: 100, x: 0, y: top })
 
@@ -34,7 +41,7 @@ const editorNode = {
   getBoundingClientRect: () => rect(composer.editorTop, composer.editorHeight),
 }
 const cardNode = {
-  getBoundingClientRect: () => rect(0, composer.editorTop + composer.editorHeight + 60),
+  getBoundingClientRect: () => rect(0, composer.cardHeight ?? composer.editorTop + composer.editorHeight + 60),
   querySelector: (selector) => (selector === '[data-composer-input]' ? (composer.editorHeight > 0 ? editorNode : null) : null),
 }
 /** The anchor sits at the card's top edge (height 0), exactly like the shipped CSS. */
@@ -48,6 +55,21 @@ const veilNode = {
   closest: (selector) => (selector === '[data-composer-overlay]' ? anchorNode : null),
   parentElement: anchorNode,
 }
+/** The composer's scrollport: the clipping ancestor between the editor and the card. */
+const scrollNode = {
+  getBoundingClientRect: () => rect(
+    composer.scrollTop ?? composer.editorTop,
+    composer.visibleHeight ?? composer.editorHeight,
+  ),
+}
+/** `.GRgSLq_grow` — a plain positioned wrapper that clips nothing. */
+const growNode = {
+  getBoundingClientRect: () => rect(composer.editorTop, composer.editorHeight),
+}
+// editor → grow → scrollport (clips) → card, the shipped nesting order
+editorNode.parentElement = growNode
+growNode.parentElement = scrollNode
+scrollNode.parentElement = cardNode
 //#endregion
 
 //#region fake ResizeObserver
@@ -391,6 +413,45 @@ FakeResizeObserver.notify(editorNode)
 flush()
 check(barsOf(skeleton.tree).length === 40, 'clamp: bar count capped at 40, got ' + barsOf(skeleton.tree).length)
 check(veilGeometry(skeleton.tree).height === 5000, 'clamp: the veil still covers the real editor height')
+
+// CLIPPING: a tall draft lives inside the composer scrollport
+// (`.GRgSLq_scroll{max-height:var(--dsh-composer-text-max-height);overflow-y:auto}`), so the
+// Lexical root measures its whole CONTENT height while only `visibleHeight` is on screen.
+// The veil must stop at the visible box, or it paints over the tool row and past the card edge.
+composer.editorHeight = 900
+composer.editorTop = 116
+composer.visibleHeight = 300
+FakeResizeObserver.notify(editorNode)
+flush()
+geometry = veilGeometry(skeleton.tree)
+check(geometry.height === 300, 'clip: veil stops at the scrollport, got ' + geometry.height)
+check(geometry.top === 116, 'clip: top still starts at the editor, got ' + geometry.top)
+bars = barsOf(skeleton.tree)
+check(bars.length === 13, 'clip: 300px visible → 13 bars, got ' + bars.length)
+check(bars.length * 10 + (bars.length - 1) * 14 <= 300, 'clip: bars fit inside the veil, got ' + (bars.length * 10 + (bars.length - 1) * 14))
+
+// scrolled: the editor's top is above the scrollport, so the veil must not paint above it
+composer.editorTop = 46
+composer.scrollTop = 116
+FakeResizeObserver.notify(editorNode)
+flush()
+geometry = veilGeometry(skeleton.tree)
+check(geometry.top === 116, 'clip: a scrolled editor never paints above the scrollport, got ' + geometry.top)
+check(geometry.height === 300, 'clip: height still the visible box, got ' + geometry.height)
+
+// the card is the painted surface: a measurement that somehow exceeds it is still capped
+composer.scrollTop = null
+composer.visibleHeight = null
+composer.editorTop = 100
+composer.editorHeight = 200
+composer.cardHeight = 250
+FakeResizeObserver.notify(editorNode)
+flush()
+geometry = veilGeometry(skeleton.tree)
+check(geometry.height === 150, 'clip: never extends past the card, got ' + geometry.height)
+composer.cardHeight = null
+composer.visibleHeight = null
+composer.scrollTop = null
 
 // completing the request removes the veil and releases every observer/listener
 pending[pending.length - 1].resolve({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, text: '改写完成', model: 'm' }) })

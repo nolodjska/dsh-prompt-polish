@@ -97,8 +97,15 @@ prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配�
 - 附件通过 `ctx.get('conversation').serializeDraftAttachments(ids)` 取得线格式，整批原子：
   只要有一个文件还在上传，这一次就整体跳过附件（日志记录，不打扰用户）。
 - 骨架屏用 `[data-composer-overlay]` → `[data-composer-card]` → `[data-composer-input]`
-  量出编辑器真实矩形，`ResizeObserver`（编辑器 + 卡片）跟随，bar 数按 24px 行距由高度推导；
+  量出编辑器矩形，`ResizeObserver`（编辑器 + 卡片）跟随，bar 数按 24px 行距由高度推导；
   量不到时退回按草稿行数估算。
+- 量出的矩形必须**裁到可见框**：编辑器 `[data-composer-input]` 会随草稿无限增高，而宿主把它
+  裁在一个滚动容器里（`.GRgSLq_scroll{max-height:var(--dsh-composer-text-max-height);overflow-y:auto}`），
+  所以它的 rect 往往远高于屏幕上的可见高度。做法是从编辑器沿 `parentElement` 走到卡片，
+  取所有祖先里**最高的 top 与最低的 bottom**（再并上卡片自身），得到的就是真实可见区域；
+  没有裁剪层时祖先只会更大，钳制自然不生效，因此不需要依赖任何哈希类名。
+- bar 数量的取整方向是**向下**：`n` 条占 `n*10+(n-1)*14 = 24n-14` 像素，向上取整会让最后一条
+  探出量出的盒子、被 `overflow:hidden` 削掉半行。
 
 ## 7. 已知耦合
 

@@ -629,6 +629,14 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
      * or accessory row sits above it. Everything is wrapped: a shell that does not
      * expose these hooks (or throws on a detached node) simply yields `null`.
      *
+     * CLAMPED TO THE VISIBLE BOX: the editor grows with the draft, but the composer
+     * clips it inside a scrollport (`.GRgSLq_scroll{max-height:var(--dsh-composer-text-max-height);
+     * overflow-y:auto}`). Its own rect is therefore often far TALLER than what the user
+     * sees — a 40-line draft measures ~900px inside a ~300px window — so the veil must be
+     * the visible intersection of the editor and every ancestor up to the card. Taking the
+     * tightest enclosing box needs no hashed class name: an unclipped chain only reports
+     * larger ancestors, which clamp nothing.
+     *
      * @param {object | null} node our own rendered veil element.
      * @returns {{ top: number, height: number } | null} offset+height, or null when unmeasurable.
      */
@@ -645,11 +653,33 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         if (editor === null || editor === undefined || typeof editor.getBoundingClientRect !== 'function') return null
         const editorRect = editor.getBoundingClientRect()
         const anchorRect = anchor.getBoundingClientRect()
-        const height = Math.round(editorRect.height)
+
+        let top = editorRect.top
+        let bottom = editorRect.bottom
+        /** Keep the tightest box: the highest top and the lowest bottom win. */
+        const clampTo = (rect) => {
+          if (rect === null || rect === undefined) return
+          if (Number.isFinite(rect.top) && Number.isFinite(top) && rect.top > top) top = rect.top
+          if (Number.isFinite(rect.bottom) && Number.isFinite(bottom) && rect.bottom < bottom) bottom = rect.bottom
+        }
+
+        // Walk from the editor out to the card. The ancestor that actually clips (the
+        // composer's scrollport) is always smaller than the unclipped editor box, so the
+        // tightest box found on the way IS the visible text area.
+        let current = editor.parentElement ?? null
+        for (let depth = 0; current !== null && current !== undefined && depth < 32; depth += 1) {
+          if (typeof current.getBoundingClientRect === 'function') clampTo(current.getBoundingClientRect())
+          if (current === card) break
+          current = current.parentElement ?? null
+        }
+        // The card is the painted surface: never extend past it, whatever the walk found.
+        if (typeof card.getBoundingClientRect === 'function') clampTo(card.getBoundingClientRect())
+
+        const height = Math.round(bottom - top)
         if (!Number.isFinite(height) || height <= 0) return null
-        const rawTop = editorRect.top - anchorRect.top
-        const top = Number.isFinite(rawTop) ? Math.max(0, Math.round(rawTop)) : SKELETON_FALLBACK_TOP
-        return { top, height }
+        const rawTop = top - anchorRect.top
+        const top_ = Number.isFinite(rawTop) ? Math.max(0, Math.round(rawTop)) : SKELETON_FALLBACK_TOP
+        return { top: top_, height }
       } catch (error) {
         console.error('[prompt-polish] composer measurement failed:', error)
         return null
@@ -708,11 +738,17 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 
     /**
      * Bar count for one veil: one bar per editor line on the 24px pitch.
+     *
+     * Rows occupy `n*10 + (n-1)*14 = 24n - 14` pixels, so the count floors rather than
+     * rounds: rounding up would make the last bar stick out of the measured box (and get
+     * clipped by the veil's `overflow:hidden`, which looks like a half-drawn line).
+     *
      * @param {number} height measured or estimated veil height.
      * @returns {number} bar count in `[1, SKELETON_MAX_BARS]`.
      */
     function skeletonBarCount(height) {
-      const raw = Math.round(height / SKELETON_BAR_PITCH)
+      const fits = (height + (SKELETON_BAR_PITCH - 10)) / SKELETON_BAR_PITCH
+      const raw = Math.floor(fits)
       return Math.min(SKELETON_MAX_BARS, Math.max(1, Number.isFinite(raw) ? raw : 1))
     }
 
