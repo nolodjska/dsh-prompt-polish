@@ -45,21 +45,24 @@ POST /api/prompt-polish/optimize      requestBody: buffered
 ### 响应体（两种结果都是 HTTP 200）
 
 ```jsonc
-{ "ok": true,  "text": "<改写后的提示词>", "model": "<模型 id>" }
+{ "ok": true,  "text": "<改写后的提示词>", "model": "<模型 id>", "route": "request-header|session-selection|default-selection" }
 { "ok": false, "message": "<中文失败原因>" }
 ```
 
-只有信封本身非法（非 JSON、缺 `sessionId`）才返回 400。
+只有信封本身非法（非 JSON、缺 `sessionId`）才返回 400。`route` 是附加的诊断字段（模型由哪一层
+解析出来），页面不读它，测试与日志使用。
 
 ## 3. 上下文从哪来
 
-改写请求带三类上下文，全部只读：
+改写请求带三类上下文，全部只读，且**每一类都可以为空**——会话刚建立、一条消息都没发过时，
+改写照常工作，只是没有历史与附件。
 
-1. **模型路由**：`ctx.sessions.get(sessionId).requestHeader().config` —— 会话日志里最后一条
-   请求记录里的 `provider`/`model`。没有记录时直接失败，绝不猜一个默认模型。
+1. **模型路由**（三层回退，见下）：优先用会话自己的请求记录；会话还没有任何请求记录时，
+   退到它当前的模型选择，再退到部署默认模型。**没有上下文不是拒绝的理由**，只有三层都
+   解析不出模型时才会失败。
 2. **对话历史**：`session.deriveMessages()` 里最近 6 条 user/assistant 消息，只取文本块，
    单条 1500 字符、合计 6000 字符（从最新往回占预算），`JSON.stringify` 后放进用户消息，
-   用 JSON 边界防止草稿伪造分隔符。
+   用 JSON 边界防止草稿伪造分隔符。**一条都没有时不生成这一段**，也不留任何空占位。
 3. **输入框附件**：
    - 图片经 `ctx.attachments.admitPromptContent()` 拿到持久引用，仅当
      `PreparedLlmCall.inputModalities` 明确含 `'image'` 时作为 `{type:'image', attachment}`
@@ -69,10 +72,24 @@ POST /api/prompt-polish/optimize      requestBody: buffered
    - 其他文件只给名称与字节数。
    - 无论能否读到正文，都会生成一段「附件清单」，逐项说明模型是否真的看得见内容。
 
-## 4. 一次调用
+## 4. 模型路由的三层解析
+
+`resolveModelRoute(ctx, session)` 按顺序取第一个能解析出 `provider`/`model` 的来源：
+
+| 层 | 来源 | 何时命中 |
+| --- | --- | --- |
+| 1 | `session.requestHeader().config` | 会话已发过消息，日志里有请求记录（最准确，等于"同一个模型"） |
+| 2 | `ctx.get('sessionProjections').stateOf(session,'modelSelection')` 的 `pending ?? lastUsed` | 会话还没有请求记录，但用户已经在输入框旁选过模型 |
+| 3 | `ctx.get('agentDefaultModel').currentSelection()` | 全新会话，连选择都没有：用部署默认模型 |
+
+第 2、3 层通过 `ctx.get()` 取，属于可选服务：profile 里没有它们时该层直接跳过，
+不影响插件激活。`reasoningEffort` 一并透传进 `prepareCall`，所以改写用的思考档位
+与输入框显示的一致。三层都取不到才返回 `ok:false`（"还无法确定用哪个模型"）。
+
+## 5. 一次调用
 
 ```
-prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配器默认值
+prepareCall({ provider, model, reasoningEffort? }, signal)   // 绑定适配器、物化适配器默认值
   → 展开 call.config 原样传给 call.stream({ ...call.config, messages, system, sessionId, signal })
   → 消费 text-delta 累积文本，记录终止 finish
   → sanitizeOutput: 去掉整体代码围栏 / 开场白行 / 整体包裹的引号，截断到 20000 字符
@@ -82,13 +99,13 @@ prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配�
 是否与 prepare 时一致（`INVALID_PREPARED_CALL`），所以必须展开 `call.config`，不能自己另写一份。
 `purpose` 只允许 `'compaction' | 'session-title'`，这里不传。
 
-## 5. 非模型可见性
+## 6. 非模型可见性
 
 - 不 append 任何会话事件，不创建消息，不改附件，不动附件 dock。
 - 图片 admit 只是内容寻址存储写入，不产生可见消息；未被引用的对象由后续回收策略处理。
 - 附件是「读懂草稿」的背景，系统提示词明确禁止把附件内容搬进改写结果。
 
-## 6. 客户端实现要点
+## 7. 客户端实现要点
 
 - 注册两个槽位：`conversation.input.activity`（工具行单槽，模型选择器右边）与
   `conversation.input.overlay`（卡片内浮层，id `prompt-polish-skeleton`）。
@@ -107,7 +124,7 @@ prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配�
 - bar 数量的取整方向是**向下**：`n` 条占 `n*10+(n-1)*14 = 24n-14` 像素，向上取整会让最后一条
   探出量出的盒子、被 `overflow:hidden` 削掉半行。
 
-## 7. 已知耦合
+## 8. 已知耦合
 
 以下三处是宿主内部实现细节，不是公开契约。宿主改名或改签名时会**降级**而不是崩溃：
 
@@ -117,7 +134,7 @@ prepareCall({ provider, model }, signal)     // 绑定适配器、物化适配�
 | 量骨架屏高度 | `[data-composer-*]` 属性 | 退回按草稿行数估算 |
 | 图片入上下文 | `PreparedLlmCall.inputModalities` | 只给附件清单与尺寸 |
 
-## 8. 测试
+## 9. 测试
 
 ```bash
 node test/run-all.mjs

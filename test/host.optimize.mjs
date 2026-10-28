@@ -45,8 +45,15 @@ function makeLlm({ chunks, onPrepare, modalities } = {}) {
       if (signal && signal.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' })
       return {
         // Mirrors the real shape: the resolved config INCLUDING a materialized adapter default
-        // (maxTokens) that the caller must spread verbatim into the dispatch options.
-        config: { provider: config.provider, model: config.model, maxTokens: config.maxTokens ?? 8192, temperature: 0.3 },
+        // (maxTokens) that the caller must spread verbatim into the dispatch options, and the
+        // resolved reasoning effort the adapter would report back (`resolveCallWithInfo`).
+        config: {
+          provider: config.provider,
+          model: config.model,
+          maxTokens: config.maxTokens ?? 8192,
+          temperature: 0.3,
+          ...config.reasoningEffort === undefined ? {} : { reasoningEffort: config.reasoningEffort },
+        },
         // `PreparedLlmCall.inputModalities` is optional; its absence means text-only.
         ...modalities === undefined ? {} : { inputModalities: modalities },
         stream: (options) => {
@@ -80,7 +87,7 @@ await test('happy path returns {ok:true,text,model} and dispatches once', async 
   const session = makeSession()
   const llm = makeLlm({ chunks: HAPPY })
   const result = await optimizePrompt({ sessions: { get: () => session }, llm }, { sessionId: 'session-7', text: '帮我改一下这个按钮' })
-  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash' })
+  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash', route: 'request-header' })
   assert.equal(llm.captured.dispatches, 1, 'exactly one dispatch')
   assert.deepEqual(llm.captured.prepareArgs[0], { provider: 'deepseek', model: 'deepseek-v4.1-flash' })
   const options = llm.captured.options[0]
@@ -166,7 +173,7 @@ await test('delta-less adapter recovers text from block-end', async () => {
     { type: 'finish', reason: { kind: 'stop' } },
   ] })
   const result = await optimizePrompt({ sessions: { get: () => makeSession() }, llm }, { sessionId: 's', text: 'draft' })
-  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash' })
+  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash', route: 'request-header' })
 })
 
 // 6. output sanitizing: fence + language tag, preamble line, wrapping quotes
@@ -237,13 +244,14 @@ await test('unknown session -> ok:false with a clear reason', async () => {
   assert.equal(llm.captured.prepareArgs.length, 0, 'never falls back to a guessed route')
 })
 
-await test('session without a request header -> ok:false, no guessed model', async () => {
+await test('no route at all -> ok:false, never guesses a model', async () => {
   const llm = makeLlm({ chunks: HAPPY })
   // NOTE: `makeSession({ header: undefined })` would hit the default parameter, so pass null.
+  // This ctx exposes no fallback services either, so nothing at all can name a model.
   const session = makeSession({ header: null })
   const result = await optimizePrompt({ sessions: { get: () => session }, llm }, { sessionId: 's', text: 'draft' })
   assert.equal(result.ok, false)
-  assert.match(result.message, /模型请求记录/)
+  assert.match(result.message, /还无法确定/)
   assert.equal(llm.captured.prepareArgs.length, 0)
 })
 
@@ -703,6 +711,121 @@ await test('v2 never mutates, releases, or appends anything', async () => {
   assert.equal(JSON.stringify(messages), before, 'derived history untouched')
   assert.equal(session.deriveMessages().length, 1, 'no message created')
 })
+
+// ---------------------------------------------------------------------------
+// v3: no context at all — the very first message of a Session must still work
+// ---------------------------------------------------------------------------
+
+/**
+ * A ctx carrying the optional route-resolution services.
+ * @param {{ projection?: object | null, selection?: object | null, session: object, llm: object }} args
+ * @returns a fake plugin context with `ctx.get`.
+ */
+function routeCtx({ projection = null, selection = null, session, llm }) {
+  const services = {}
+  if (projection !== null) services.sessionProjections = { stateOf: () => projection }
+  if (selection !== null) services.agentDefaultModel = { currentSelection: () => selection }
+  return { sessions: { get: () => session }, llm, get: (name) => services[name] }
+}
+
+await test('first message of a Session: works with no history and no request header', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession({ header: null, messages: [] })
+  const ctx = routeCtx({
+    session,
+    llm,
+    selection: { provider: 'deepseek', model: 'deepseek-v4.1-flash', reasoningEffort: 'medium' },
+  })
+  const result = await optimizePrompt(ctx, { sessionId: 's-first', text: '把这段整理成一条提示词' })
+  assert.equal(result.ok, true, 'a brand-new Session is not refused: ' + JSON.stringify(result))
+  assert.equal(result.route, 'default-selection')
+  assert.equal(llm.captured.dispatches, 1, 'the rewrite really ran')
+  assert.deepEqual(llm.captured.prepareArgs[0], {
+    provider: 'deepseek',
+    model: 'deepseek-v4.1-flash',
+    reasoningEffort: 'medium',
+  })
+  // The default selection's reasoning effort must survive into the dispatch options.
+  assert.equal(llm.captured.options[0].reasoningEffort, 'medium')
+  // No history → no context block in the user input at all.
+  const content = llm.captured.options[0].messages[0].content
+  assert.equal(content.length, 1, 'a single text block when there is nothing else')
+  assert.equal(content[0].type, 'text')
+  assert.doesNotMatch(content[0].text, /最近对话记录/, 'no empty history framing')
+  assert.doesNotMatch(content[0].text, /附件清单/, 'no empty attachment inventory')
+  assert.match(content[0].text, /把这段整理成一条提示词/, 'the draft is still the subject')
+})
+
+await test('the system prompt tells the model that having no context is normal', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession({ header: null, messages: [] })
+  const result = await optimizePrompt(routeCtx({ session, llm, selection: { provider: 'p', model: 'm' } }), {
+    sessionId: 's',
+    text: 'draft',
+  })
+  assert.equal(result.ok, true)
+  const system = llm.captured.options[0].system
+  assert.match(system, /第一条消息/, 'names the first-message case')
+  assert.match(system, /缺少上下文/, 'forbids asking the user for context')
+})
+
+await test('no request header: the Session selection (pending) supplies the route', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession({ header: null, messages: [] })
+  const ctx = routeCtx({
+    session,
+    llm,
+    projection: {
+      lastUsed: { provider: 'deepseek', model: 'old-model' },
+      pending: { provider: 'deepseek', model: 'deepseek-v4.1-pro', reasoningEffort: 'high' },
+    },
+    selection: { provider: 'deepseek', model: 'deployment-default' },
+  })
+  const result = await optimizePrompt(ctx, { sessionId: 's', text: 'draft' })
+  assert.equal(result.ok, true)
+  assert.equal(result.route, 'session-selection')
+  assert.equal(result.model, 'deepseek-v4.1-pro', 'the composer selection wins over the default')
+  assert.equal(llm.captured.prepareArgs[0].reasoningEffort, 'high')
+})
+
+await test('no request header and no pending selection: lastUsed still supplies the route', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession({ header: null, messages: [] })
+  const ctx = routeCtx({
+    session,
+    llm,
+    projection: { lastUsed: { provider: 'deepseek', model: 'deepseek-v4.1-pro' }, pending: null },
+  })
+  const result = await optimizePrompt(ctx, { sessionId: 's', text: 'draft' })
+  assert.equal(result.ok, true)
+  assert.equal(result.route, 'session-selection')
+  assert.equal(result.model, 'deepseek-v4.1-pro')
+})
+
+await test('a logged request header still wins over any selection', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession() // header = deepseek / deepseek-v4.1-flash
+  const ctx = routeCtx({
+    session,
+    llm,
+    projection: { lastUsed: null, pending: { provider: 'other', model: 'other-model' } },
+    selection: { provider: 'other', model: 'deployment-default' },
+  })
+  const result = await optimizePrompt(ctx, { sessionId: 's', text: 'draft' })
+  assert.equal(result.ok, true)
+  assert.equal(result.route, 'request-header')
+  assert.equal(result.model, 'deepseek-v4.1-flash')
+})
+
+await test('no header, no selection, no default -> ok:false without dispatching', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  const session = makeSession({ header: null, messages: [] })
+  const result = await optimizePrompt(routeCtx({ session, llm }), { sessionId: 's', text: 'draft' })
+  assert.equal(result.ok, false)
+  assert.match(result.message, /还无法确定/)
+  assert.equal(llm.captured.dispatches, 0)
+})
+
 
 console.log('')
 if (failures.length > 0) {

@@ -340,6 +340,30 @@ check(findAll(skeleton2.tree, (n) => n.props.className === 'pp-skeleton').length
 setDraftExternal('   ')
 check(findButton(button2.tree).props.disabled === true, 'blank draft: button disabled')
 
+// ---------------------------------------------------------------------------
+// no context at all: the first message of a Session must still be polishable.
+// The button is gated on the draft only — never on history, projections or
+// attachments — so a brand-new Session behaves exactly like any other.
+// ---------------------------------------------------------------------------
+setDraftExternal('把这段整理成一条提示词')
+const freshButton = mount(Button, makeProps('s-brand-new'))
+const freshSkeleton = mount(Skeleton, makeProps('s-brand-new'))
+check(findButton(freshButton.tree).props.disabled !== true, 'first message: enabled with no history at all')
+findButton(freshButton.tree).props.onClick()
+flush()
+check(pendingRequest !== null, 'first message: the request really goes out')
+const firstBody = JSON.parse(pendingRequest.init.body)
+check(firstBody.sessionId === 's-brand-new', 'first message: carries the new session id')
+check(firstBody.text === '把这段整理成一条提示词', 'first message: carries the draft')
+check(firstBody.attachments === undefined, 'first message: no attachment key when the dock is empty')
+check(findButton(freshButton.tree).props['data-phase'] === 'pending', 'first message: enters pending')
+check(findAll(freshSkeleton.tree, (n) => n.props.className === 'pp-skeleton').length === 1, 'first message: skeleton plays')
+pendingRequest.resolve({ ok: true, status: 200, text: async () => JSON.stringify({ ok: true, text: '改写后的提示词', model: 'm' }) })
+await tick()
+flush()
+check(writes[writes.length - 1] === '改写后的提示词', 'first message: the draft is rewritten')
+check(findButton(freshButton.tree).props['data-phase'] === 'done', 'first message: undo is offered')
+
 const failed = results.filter(([ok]) => !ok)
 console.log('\n' + (results.length - failed.length) + '/' + results.length + ' checks passed')
 if (failed.length > 0) process.exitCode = 1

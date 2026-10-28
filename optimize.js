@@ -89,6 +89,7 @@ const SYSTEM_PROMPT = [
   '5. 只输出改写后的提示词正文。不要开场白、不要解释、不要总结、不要说“以下是改写结果”之类的话，不要用 ``` 代码围栏包裹，也不要给整段加引号。第一行就必须是提示词本身。',
   '6. 可以借助用户消息中给出的“最近对话记录”消解草稿里的指代（如“这个/它/上面那个/刚才那个”），把它替换成明确的指称；但不要把对话内容复述进提示词，也不要提及“上下文”“对话记录”“历史”这类字眼。',
   '7. 用户消息里可能带有“附件清单”和附件内容。附件只是帮助你理解草稿的背景：凡是草稿里提到某个附件（“这张图”“这个文件”“上面的报错”），改写后必须用清单中完全相同的附件名字来指代它；清单标注“模型不可见”的附件只能按名称与大小引用，不得猜测或编造它的内容；也不要把附件内容整段搬运进提示词。没有附件时就完全忽略这一条。',
+  '8. 草稿可能完全没有上下文：这是会话的第一条消息，没有历史对话，也可能没有任何附件。这种情况就直接依据草稿本身改写，正常输出提示词正文；不要说“缺少上下文”“信息不足”“请补充背景”，也不要向用户提问或索要补充材料。',
 ].join('\n')
 
 // ---------------------------------------------------------------------------
@@ -637,6 +638,73 @@ function supportsImageInput(call) {
   return Array.isArray(modalities) && modalities.includes('image')
 }
 
+/**
+ * Read one model-selection candidate as `{ provider, model, reasoningEffort? }`.
+ * @param {unknown} value a `ModelSelection`, a `LlmCallConfig`, or junk.
+ * @returns {{ provider: string, model: string, reasoningEffort?: string } | null}
+ */
+function asSelection(value) {
+  if (value === null || typeof value !== 'object') return null
+  const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
+  const model = typeof value.model === 'string' ? value.model.trim() : ''
+  if (provider === '' || model === '') return null
+  const effort = typeof value.reasoningEffort === 'string' && value.reasoningEffort !== '' ? value.reasoningEffort : undefined
+  return effort === undefined ? { provider, model } : { provider, model, reasoningEffort: effort }
+}
+
+/**
+ * Resolve the route one rewrite should use.
+ *
+ * A conversation's own logged request is the exact model its turns run on, so it wins.
+ * A brand-new Session — the case this chain exists for — has sent nothing yet and owns no
+ * `request/header`, so the selection its composer currently shows comes next, and the
+ * deployment default last. **Having no context is never a reason to refuse**: only having
+ * no usable route at all is.
+ *
+ * @param {unknown} ctx plugin context (`ctx.get` for the optional services).
+ * @param {unknown} session the live Session the draft belongs to.
+ * @returns {{ provider: string, model: string, reasoningEffort?: string, source: string } | null}
+ *   the route and which tier produced it, or null when nothing is resolvable.
+ */
+function resolveModelRoute(ctx, session) {
+  // 1. the exact route of the Session's last real request
+  try {
+    const header = typeof session.requestHeader === 'function' ? session.requestHeader() : undefined
+    const config = header !== null && typeof header === 'object' ? header.config : undefined
+    const selection = asSelection(config)
+    if (selection !== null) return { ...selection, source: 'request-header' }
+  } catch {
+    /* fall through to the next tier */
+  }
+
+  // 2. the Session's durable model-selection intent — `pending` (what the composer shows
+  //    now) wins over `lastUsed` (what it last ran with). Registration-independent: a
+  //    profile without the projection yields no state and simply moves on.
+  try {
+    const projections = typeof ctx.get === 'function' ? ctx.get('sessionProjections') : undefined
+    if (projections !== null && typeof projections === 'object' && typeof projections.stateOf === 'function') {
+      const state = projections.stateOf(session, 'modelSelection')
+      const selection = asSelection(state?.pending ?? state?.lastUsed)
+      if (selection !== null) return { ...selection, source: 'session-selection' }
+    }
+  } catch {
+    /* fall through to the next tier */
+  }
+
+  // 3. the deployment default selection
+  try {
+    const defaults = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : undefined
+    const selection = defaults !== null && typeof defaults === 'object' && typeof defaults.currentSelection === 'function'
+      ? asSelection(defaults.currentSelection())
+      : null
+    if (selection !== null) return { ...selection, source: 'default-selection' }
+  } catch {
+    /* fall through to the failure below */
+  }
+
+  return null
+}
+
 /** Whole-output Markdown fence, optionally with a language tag. */
 const FENCE_WRAPPER = /^```[^\n]*\n(?<body>[\s\S]*?)\n?```$/u
 
@@ -818,19 +886,11 @@ async function runOptimize(ctx, request) {
   if (typeof session.requestHeader !== 'function') {
     return fail('当前会话无法读取模型路由信息，暂时无法优化。')
   }
-  let header
-  try {
-    header = session.requestHeader()
-  } catch {
-    header = undefined
+  const route = resolveModelRoute(ctx, session)
+  if (route === null) {
+    return fail('还无法确定用哪个模型（这个会话既没有请求记录，也没有模型选择或默认模型）。请先在输入框旁选一个模型再试。')
   }
-  const callConfig = header !== null && typeof header === 'object' ? header.config : undefined
-  const provider = callConfig !== null && typeof callConfig === 'object' ? callConfig.provider : undefined
-  const model = callConfig !== null && typeof callConfig === 'object' ? callConfig.model : undefined
-  if (typeof provider !== 'string' || provider.length === 0 || typeof model !== 'string' || model.length === 0) {
-    // No guessed fallback route: without the logged header we cannot honor "same model".
-    return fail('当前会话还没有可用的模型请求记录，请先发送一条消息后再试。')
-  }
+  const { provider, model, reasoningEffort, source: routeSource } = route
 
   const llm = ctx !== null && typeof ctx === 'object' ? ctx.llm : undefined
   if (llm === null || typeof llm !== 'object' || typeof llm.prepareCall !== 'function') {
@@ -843,9 +903,12 @@ async function runOptimize(ctx, request) {
 
     // Prepare once: this binds the route to one adapter registration and materializes
     // adapter defaults (`maxTokens` ← the model's `defaultMaxTokens`). No explicit control
-    // is requested, so the resolved config is exactly what the provider normally allows and
-    // `call.stream`'s config equality check passes.
-    const call = await llm.prepareCall({ provider, model }, scope.signal)
+    // is requested beyond the session's own reasoning effort, so the resolved config is
+    // exactly what the provider normally allows and `call.stream`'s equality check passes.
+    const callConfig = reasoningEffort === undefined
+      ? { provider, model }
+      : { provider, model, reasoningEffort }
+    const call = await llm.prepareCall(callConfig, scope.signal)
     if (call === null || typeof call !== 'object' || typeof call.stream !== 'function'
       || call.config === null || typeof call.config !== 'object') {
       return fail('模型路由准备失败，暂时无法优化。')
@@ -922,7 +985,9 @@ async function runOptimize(ctx, request) {
 
     const cleaned = sanitizeOutput(streamed.length > 0 ? streamed : closedBlocks)
     if (cleaned.length === 0) return fail('模型没有返回可用的提示词，请重试。')
-    return { ok: true, text: cleaned, model }
+    // `route` is additive diagnostics: which tier of `resolveModelRoute` supplied the
+    // model. The page ignores it, tests and logs use it.
+    return { ok: true, text: cleaned, model, route: routeSource }
   } catch (error) {
     if (scope.timedOut()) return fail(timeoutMessage())
     if (signal !== null && typeof signal === 'object' && signal.aborted === true) return fail(cancelledMessage())
