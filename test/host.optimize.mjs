@@ -205,6 +205,87 @@ await test('keeps a prompt that legitimately contains quotes', async () => {
   assert.equal(result.text, '请把日志里的 "timeout" 和 "retry" 两个字段改名')
 })
 
+// ---------------------------------------------------------------------------
+// commentary must never reach the composer
+// ---------------------------------------------------------------------------
+
+/** Feed one raw model answer through the whole pipeline and return the reply. */
+async function replyFor(raw) {
+  const llm = makeLlm({ chunks: [
+    { type: 'text-delta', index: 0, text: raw },
+    { type: 'finish', reason: { kind: 'stop' } },
+  ] })
+  return optimizePrompt({ sessions: { get: () => makeSession({ messages: [] }) }, llm }, { sessionId: 's', text: 'draft' })
+}
+
+/** The exact answer a real run produced for the "不要妥协" draft (see the bug report). */
+const REPORTED_OUTPUT = [
+  '不要做取舍，也不要退成折中方案。就按完整方案来做，一次性做到位——直接按最终形态实现，不要留“先这样、以后再收”的中间态。',
+  '',
+  '**更短的版本（如果要保持原来的力度）：**',
+  '',
+  '> 不要折中。按完整方案一次做到位，直接按最终形态实现。',
+  '',
+  '改动说明：原句“不要妥协”和“完美实现”表达的是同一层意思，即“别退让”，但“完美”容易被理解成主观质量标准；改写后改成可执行的要求——“完整方案、不留中间态、一次做到位”，力度不减，指向更明确。如果这句话是要发给执行方（子代理或实现环节），建议再补一句验收基准（例如“以统一入口 + 同一份 tab 状态为准，不以能跑通为通过”），否则“完整”仍会由对方自行定义。',
+].join('\n')
+
+await test('drops an alternative version and the change notes a model appends', async () => {
+  const result = await replyFor(REPORTED_OUTPUT)
+  assert.equal(result.ok, true)
+  assert.equal(
+    result.text,
+    '不要做取舍，也不要退成折中方案。就按完整方案来做，一次性做到位——直接按最终形态实现，不要留“先这样、以后再收”的中间态。',
+  )
+  assert.doesNotMatch(result.text, /更短的版本/, 'no alternative version')
+  assert.doesNotMatch(result.text, /改动说明/, 'no change notes')
+  assert.doesNotMatch(result.text, /不要折中/, 'the shorter variant is gone too')
+  assert.doesNotMatch(result.text, /建议|验收基准|执行方/, 'no advice for the user')
+})
+
+await test('drops an inline change-notes block and the advice after it', async () => {
+  const raw = [
+    '把 docs/README.md 的安装步骤补全到能一次跑通，并保持现有标题层级。',
+    '',
+    '改动说明：把“补全”具体化成了可验证的动作，并保留原有的层级约束。',
+    '如果这是要交给子代理，建议再补一句验收基准。',
+  ].join('\n')
+  const result = await replyFor(raw)
+  assert.equal(result.text, '把 docs/README.md 的安装步骤补全到能一次跑通，并保持现有标题层级。')
+})
+
+await test('an answer that is nothing but commentary is rejected, not shipped', async () => {
+  const raw = '改动说明：原句过于啰嗦，我把它精简了。建议再补一句验收标准。'
+  const result = await replyFor(raw)
+  assert.equal(result.ok, false, 'no prompt was produced')
+  assert.match(result.message, /没有返回可用的提示词/)
+})
+
+await test('a trailing advice paragraph is dropped, the prompt is kept', async () => {
+  const raw = [
+    '请把 src/a.ts 的 maxTokens 调到 2048，并补一个单元测试。',
+    '',
+    '如果这句话是要发给执行方（子代理或实现环节），建议再补一句验收基准，否则“完整”仍会由对方自行定义。',
+  ].join('\n')
+  const result = await replyFor(raw)
+  assert.equal(result.text, '请把 src/a.ts 的 maxTokens 调到 2048，并补一个单元测试。')
+})
+
+await test('over-cutting guards: legitimate prompts keep their own labels and rules', async () => {
+  // A plain label WITH content on the same line is a sentence of the prompt, not a section.
+  const withLabel = [
+    '注意：不要修改现有测试文件，也不要调整 tsconfig。',
+    '说明：所有改动都要在 src/ 目录内完成。',
+    '请把 版本号 从 1.2.3 升到 1.2.4，并同步 CHANGELOG。',
+  ].join('\n')
+  assert.equal((await replyFor(withLabel)).text, withLabel)
+  // A horizontal rule inside the prompt is formatting, not a meta divider.
+  const withRule = ['第一步：读 docs/protocol.md。', '---', '第二步：按文档改 optimize.js。'].join('\n')
+  assert.equal((await replyFor(withRule)).text, withRule)
+  // A closing conditional that is part of the instruction survives.
+  const withConditional = '如果单元测试失败，先修实现再提交，不要放宽断言。'
+  assert.equal((await replyFor(withConditional)).text, withConditional)
+})
+
 // 7. failure branches
 await test('rejects a blank draft without touching the model', async () => {
   const llm = makeLlm({ chunks: HAPPY })

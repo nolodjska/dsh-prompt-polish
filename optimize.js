@@ -90,6 +90,8 @@ const SYSTEM_PROMPT = [
   '6. 可以借助用户消息中给出的“最近对话记录”消解草稿里的指代（如“这个/它/上面那个/刚才那个”），把它替换成明确的指称；但不要把对话内容复述进提示词，也不要提及“上下文”“对话记录”“历史”这类字眼。',
   '7. 用户消息里可能带有“附件清单”和附件内容。附件只是帮助你理解草稿的背景：凡是草稿里提到某个附件（“这张图”“这个文件”“上面的报错”），改写后必须用清单中完全相同的附件名字来指代它；清单标注“模型不可见”的附件只能按名称与大小引用，不得猜测或编造它的内容；也不要把附件内容整段搬运进提示词。没有附件时就完全忽略这一条。',
   '8. 草稿可能完全没有上下文：这是会话的第一条消息，没有历史对话，也可能没有任何附件。这种情况就直接依据草稿本身改写，正常输出提示词正文；不要说“缺少上下文”“信息不足”“请补充背景”，也不要向用户提问或索要补充材料。',
+  '9. 你的输出会被原样放回用户的输入框，直接发送给 AI 助手。因此下面这些内容一律禁止出现在输出里：改动说明、改写理由、与原句的对比、“更短的版本/备选版本/方案二”、对草稿的点评、给用户的建议（例如“建议再补一句验收标准”“如果这是发给执行方的…”）、以及任何形式的提问或反问。它们会被当成提示词的一部分发出去，属于严重错误。',
+  '10. 只给一个版本，就是你判断最好的那一版；不要同时给长版短版，也不要先写一版再附一版。草稿本身已经是一条明确指令时，只把它的措辞收紧、结构理清，力度和语气保持不变，不要把它改写成分析或建议。输出的最后一行必须就是提示词的最后一句话。',
 ].join('\n')
 
 // ---------------------------------------------------------------------------
@@ -711,6 +713,81 @@ const FENCE_WRAPPER = /^```[^\n]*\n(?<body>[\s\S]*?)\n?```$/u
 /** A bare preamble line such as "以下是改写后的提示词：". */
 const PREAMBLE_LINE = /^(?:以下|下面|这)是?(?:改写|优化|润色)(?:后|过|好)?的?(?:提示词|prompt|结果|版本)[:：]?$/iu
 
+/**
+ * Meta sections a rewrite must never ship: they explain the change, offer an alternative
+ * version, or advise the user. They are matched at the START of a line, optionally wrapped
+ * in markdown emphasis/heading marks, and either end after the label or carry a colon.
+ *
+ * Deliberately narrow. Words like 注意/说明/建议 DO appear inside legitimate prompts (for
+ * example "注意：不要修改现有测试"), so a plain label only counts when it stands ALONE on
+ * its line (nothing after the colon) — that is the shape of a section heading, not of a
+ * sentence inside the prompt.
+ */
+const META_LABEL = '(?:改动说明|修改说明|改写说明|变更说明|改写理由|修改理由|改动点|变更点|差异对比|对比说明|补充说明|使用说明|更短的版本|更简洁的版本|更短的写法|短版本|长版本|简版|备选版本|备选方案|另一个版本|另一版本|另一个写法|版本[一二三四五\\d１-９]|方案[一二三四五\\d１-９]|验收基准建议)'
+const META_SECTION_LINE = new RegExp(
+  '^[\\s\\-*+>#]*\\*{0,2}' + META_LABEL + '\\*{0,2}\\s*(?:[（(][^）)]{0,80}[）)])?\\s*[:：]?\\s*\\*{0,2}\\s*$',
+  'u',
+)
+/** Same labels, but allowed to introduce a block on the same line ("改动说明：原句…"). */
+const META_SECTION_INLINE = new RegExp(
+  '^[\\s\\-*+>#]*\\*{0,2}' + META_LABEL + '\\*{0,2}\\s*(?:[（(][^）)]{0,80}[）)])?\\s*[:：]',
+  'u',
+)
+/** A plain label that is only meta when it heads a section (nothing else on the line). */
+const PLAIN_SECTION_LINE = /^[\s\-*+>#]*\*{0,2}(?:说明|备注|注意|提示|建议|理由|区别|优点|缺点|风险|适用范围)\*{0,2}\s*[:：]?\s*\*{0,2}\s*$/u
+/** A trailing paragraph that advises the user instead of being part of the prompt. */
+const TRAILING_ADVICE = /^(?:如果|若|假如|建议|另外|顺便)[^\n]{0,160}(?:建议|验收|补充|补一句|执行方|子代理|自行定义|才能|可以通过)/u
+
+/**
+ * Drop everything from the first meta section on.
+ *
+ * The shipped failure mode: the model returns the rewritten prompt, then a "更短的版本"
+ * block and a "改动说明：…" paragraph, then advice — all of which would be pasted into the
+ * composer and sent. The first meta heading is a reliable cut point, because a prompt
+ * that legitimately uses these words keeps them inside a sentence rather than alone on a
+ * line or after a colon.
+ *
+ * @param {string} text cleaned model output.
+ * @returns {{ text: string, cut: boolean }} the prompt part, and whether anything was cut.
+ */
+function cutMetaSections(text) {
+  const lines = text.split('\n')
+  const keep = (end) => ({ text: lines.slice(0, end).join('\n').replace(/\s+$/u, ''), cut: true })
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index].trim()
+    if (line === '') continue
+    // A horizontal rule only ends the prompt when a meta block follows it; on its own it may
+    // legitimately be part of the prompt's own formatting.
+    if (/^(?:-{3,}|\*{3,}|_{3,})$/u.test(line)) {
+      const next = lines.slice(index + 1).find((candidate) => candidate.trim() !== '')
+      if (next !== undefined) {
+        const nextLine = next.trim()
+        if (/^>/u.test(nextLine) || META_SECTION_LINE.test(nextLine) || META_SECTION_INLINE.test(nextLine)) return keep(index)
+      }
+      continue
+    }
+    // The very first line being a meta label means the whole answer is commentary.
+    if (index === 0 && META_SECTION_INLINE.test(line)) return { text: '', cut: true }
+    if (index > 0 && (META_SECTION_LINE.test(line) || META_SECTION_INLINE.test(line) || PLAIN_SECTION_LINE.test(line))) return keep(index)
+  }
+  return { text, cut: false }
+}
+
+/**
+ * Drop a final paragraph whose only purpose is to advise the user.
+ * @param {string} text prompt candidate.
+ * @returns {{ text: string, cut: boolean }} the prompt part, and whether anything was cut.
+ */
+function cutTrailingAdvice(text) {
+  const trimmed = text.replace(/\s+$/u, '')
+  if (trimmed === '') return { text: trimmed, cut: false }
+  const paragraphs = trimmed.split(/\n{2,}/u)
+  if (paragraphs.length < 2) return { text: trimmed, cut: false }
+  const last = paragraphs[paragraphs.length - 1].trim()
+  if (!TRAILING_ADVICE.test(last)) return { text: trimmed, cut: false }
+  return { text: paragraphs.slice(0, -1).join('\n\n').replace(/\s+$/u, ''), cut: true }
+}
+
 /** Quote pairs a model may wrap the whole answer in. */
 const QUOTE_PAIRS = [
   ['"', '"'],
@@ -767,6 +844,13 @@ function sanitizeOutput(raw) {
     dropLeadingBlankLines()
   }
   text = lines.join('\n').trim()
+
+  // Commentary, alternatives and advice are not part of the prompt: cut them before the
+  // quote/ceiling steps so the user never sends them to the model.
+  const withoutMeta = cutMetaSections(text)
+  text = withoutMeta.text
+  const withoutAdvice = cutTrailingAdvice(text)
+  text = withoutAdvice.text
 
   text = stripWrappingQuotes(text)
   if (text.length > OUTPUT_MAX_CHARS) text = `${text.slice(0, OUTPUT_MAX_CHARS - 1)}…`

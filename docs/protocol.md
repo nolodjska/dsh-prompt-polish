@@ -92,12 +92,28 @@ POST /api/prompt-polish/optimize      requestBody: buffered
 prepareCall({ provider, model, reasoningEffort? }, signal)   // 绑定适配器、物化适配器默认值
   → 展开 call.config 原样传给 call.stream({ ...call.config, messages, system, sessionId, signal })
   → 消费 text-delta 累积文本，记录终止 finish
-  → sanitizeOutput: 去掉整体代码围栏 / 开场白行 / 整体包裹的引号，截断到 20000 字符
+  → sanitizeOutput: 去掉整体代码围栏 / 开场白行 / **夹带的说明与备选版本** / 尾部建议段 / 整体包裹的引号，截断到 20000 字符
 ```
 
 `call.stream()` 在派发前会比对 `provider/model/reasoningEffort/temperature/maxTokens`
 是否与 prepare 时一致（`INVALID_PREPARED_CALL`），所以必须展开 `call.config`，不能自己另写一份。
 `purpose` 只允许 `'compaction' | 'session-title'`，这里不传。
+
+### 输出净化：多余内容不能进输入框
+
+模型偶尔会把「更短的版本／改动说明／给你的建议」一起吐出来，而这些会被原样放回输入框、
+随下一条消息发给模型。两道防线：
+
+1. **系统提示词第 9、10 条**明确禁止：改动说明、改写理由、与原句对比、备选版本/方案二、
+   对草稿的点评、给用户的建议、任何提问；只给一个版本，最后一行就是提示词的最后一句话。
+2. **`cutMetaSections()` / `cutTrailingAdvice()`** 兜底：
+   - 在**行首**匹配一组窄标签（改动说明、改写说明、变更点、更短的版本、备选方案、版本二、
+     验收基准建议…），命中即从该行截断；横向分隔线只有在**下一段是引言或元信息块**时才截断，
+     所以提示词自身用 `---` 分节不会被误砍；
+   - 单纯标签（说明/注意/备注/建议/理由）只有在**整行只有标签**时才算元信息，
+     `注意：不要修改现有测试` 这种句子照旧保留；
+   - 末尾单独一段若以「如果/若/建议」开头且含「建议/验收/补充/执行方」等词，视为给你的指点丢掉。
+   - 整篇都是元信息（首行即命中）时返回空 → 报「模型没有返回可用的提示词」，绝不把说明当提示词发出去。
 
 ## 6. 非模型可见性
 
