@@ -366,8 +366,44 @@ await test('a plain answer without any envelope still works (back-compat)', asyn
   assert.equal(result.text, '把 src/a.ts 的 maxTokens 调到 2048，并补一个单元测试。')
 })
 
-await test('an empty block is rejected instead of shipping an empty draft', async () => {
-  const result = await replyFor(envelope('   ', '说明：我觉得原句已经够好了。'))
+// ---------------------------------------------------------------------------
+// line breaks: the draft must arrive as real newlines, never as `\n` escapes
+// ---------------------------------------------------------------------------
+
+await test('decodes \\n escapes the model wrote instead of real line breaks', async () => {
+  const result = await replyFor('[[PROMPT_BEGIN]]第一行\\n第二行\\n\\n第三步：提交[[PROMPT_END]]')
+  assert.equal(result.format, 'envelope')
+  assert.equal(result.text, '第一行\n第二行\n\n第三步：提交')
+  assert.ok(result.text.includes('\n'), 'real newlines, so the composer makes paragraphs')
+  assert.ok(!result.text.includes('\\n'), 'no escape sequence is left in the draft')
+})
+
+await test('decodes double-escaped and HTML line breaks too', async () => {
+  assert.equal((await replyFor('[[PROMPT_BEGIN]]a\\\\nb[[PROMPT_END]]')).text, 'a\nb')
+  assert.equal((await replyFor('[[PROMPT_BEGIN]]一行<br>二行[[PROMPT_END]]')).text, '一行\n二行')
+})
+
+await test('salvages a JSON answer whose string carries raw newlines', async () => {
+  const raw = '{"prompt": "第一行\n第二行", "notes": "手写的 JSON，字符串里有真换行"}'
+  const result = await replyFor(raw)
+  assert.equal(result.format, 'json')
+  assert.equal(result.text, '第一行\n第二行')
+})
+
+await test('keeps a prompt that only MENTIONS an escape sequence', async () => {
+  const raw = "[[PROMPT_BEGIN]]把 '\\n' 这个转义原样保留，只改 split 的实现[[PROMPT_END]]"
+  const result = await replyFor(raw)
+  assert.equal(result.text, "把 '\\n' 这个转义原样保留，只改 split 的实现")
+  assert.ok(result.text.includes('\\n'), 'a quoted escape is content, not a line break')
+})
+
+await test('real newlines are left exactly as they are', async () => {
+  const raw = '[[PROMPT_BEGIN]]第一行\n第二行\n\n- 分点一\n- 分点二\n[[PROMPT_END]]'
+  const result = await replyFor(raw)
+  assert.equal(result.text, '第一行\n第二行\n\n- 分点一\n- 分点二')
+})
+
+await test('an empty block is rejected instead of shipping an empty draft', async () => {  const result = await replyFor(envelope('   ', '说明：我觉得原句已经够好了。'))
   assert.equal(result.ok, false)
   assert.match(result.message, /没有返回可用的提示词/)
 })

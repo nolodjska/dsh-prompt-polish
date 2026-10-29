@@ -110,7 +110,7 @@ const SYSTEM_PROMPT = [
   '4. 不要编造草稿中没有的事实、接口、数据、依赖或需求；信息不足时保持克制，不要替用户做业务决定。',
   '5. [[PROMPT_BEGIN]] 与 [[PROMPT_END]] 之间只能有提示词正文：不要放解释、改动说明、与原句的对比、备选版本（“更短的版本/方案二”）、对草稿的点评、给用户的建议、提问或反问。这些内容一律写进 NOTES 块，或者干脆不写。',
   '6. 只给一个版本，就是你判断最好的那一版；不要同时给长版短版。草稿本身已经是一条明确指令时，只把它的措辞收紧、结构理清，力度和语气保持不变，不要把它改写成分析或建议。',
-  '7. 块内的提示词不要用 ``` 代码围栏包裹，不要给整段加引号，也不要再写一遍“提示词：”；第一行就是提示词本身，最后一行就是它的最后一句话。',
+  '7. 块内的提示词不要用 ``` 代码围栏包裹，不要给整段加引号，也不要再写一遍“提示词：”；第一行就是提示词本身，最后一行就是它的最后一句话。段落之间要写真正的换行，不要写成 \\n 这类转义字符（那样会在输入框里显示成一整行）。',
   '8. 可以借助用户消息里给出的“最近对话记录”消解草稿里的指代（如“这个/它/上面那个/刚才那个”），把它替换成明确的指称；但不要把对话内容复述进提示词，也不要提及“上下文”“对话记录”“历史”这类字眼。',
   '9. 用户消息里可能带有“附件清单”和附件内容。附件只是帮助你理解草稿的背景：凡是草稿里提到某个附件（“这张图”“这个文件”“上面的报错”），改写后必须用清单中完全相同的附件名字来指代它；清单标注“模型不可见”的附件只能按名称与大小引用，不得猜测或编造它的内容；也不要把附件内容整段搬运进提示词。没有附件时忽略这一条。',
   '10. 草稿可能完全没有上下文：这是会话的第一条消息，没有历史对话，也可能没有任何附件。这种情况就直接依据草稿本身改写，正常输出提示词正文；不要说“缺少上下文”“信息不足”“请补充背景”，也不要向用户提问或索要补充材料。',
@@ -882,12 +882,82 @@ function extractJsonPrompt(text) {
     try {
       parsed = JSON.parse(source)
     } catch {
+      // A hand-written JSON answer often carries RAW newlines inside the string, which is
+      // not valid JSON. Salvage the field instead of discarding the whole answer.
+      const salvaged = salvagePromptField(source)
+      if (salvaged !== null) return salvaged
       continue
     }
     const value = parsed !== null && typeof parsed === 'object' ? parsed.prompt : undefined
     if (typeof value === 'string' && value.trim() !== '') return value
   }
   return null
+}
+
+/**
+ * Read a `prompt` string out of text that is not valid JSON.
+ *
+ * Scans for the field and then walks to the next UNESCAPED quote, so raw newlines inside the
+ * value are kept as newlines instead of breaking the parse. Escape sequences the value does
+ * contain (`\n`, `\t`, `\"`, `\\`, `\uXXXX`) are decoded, because the model meant them as
+ * content.
+ *
+ * @param {string} source a `{…}`-shaped answer that failed `JSON.parse`.
+ * @returns {string | null} the decoded field, or null when no `prompt` field can be read.
+ */
+function salvagePromptField(source) {
+  const field = /"prompt"\s*:\s*"/u.exec(source)
+  if (field === null) return null
+  const start = field.index + field[0].length
+  let body = ''
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index]
+    if (character === '\\') {
+      const next = source[index + 1]
+      index += 1
+      if (next === 'n') body += '\n'
+      else if (next === 'r') body += '\r'
+      else if (next === 't') body += '\t'
+      else if (next === 'u') {
+        const hex = source.slice(index + 1, index + 5)
+        index += 4
+        body += /^[0-9a-fA-F]{4}$/u.test(hex) ? String.fromCharCode(Number.parseInt(hex, 16)) : ''
+      } else body += next ?? ''
+      continue
+    }
+    if (character === '"') break
+    body += character
+  }
+  return body.trim() === '' ? null : body
+}
+
+/**
+ * Decode line breaks the model wrote as ESCAPE SEQUENCES instead of real ones.
+ *
+ * The composer builds one paragraph per real `"\n"` (`$appendParagraphs` splits on it), so a
+ * block that arrives as `第一行\n第二行` renders as one line with a visible `\n` in it. Only
+ * applied when there is no real newline at all, and never when an escape looks quoted —
+ * a prompt that literally talks about `split('\n')` must keep its backslash.
+ *
+ * @param {string} text extracted answer.
+ * @returns {string} the same text with real line breaks where escapes were meant as such.
+ */
+function normalizeEscapedNewlines(text) {
+  if (text === '' || text.includes('\n')) return text
+  const hasEscape = /\\+[nrt]/u.test(text) || /<br\s*\/?>/iu.test(text)
+  if (!hasEscape) return text
+  // A quoted escape means the prompt MENTIONS it, so there is nothing to decode.
+  if (/["'`“”‘’]\s*\\+[nrt]|\\+[nrt]\s*["'`“”‘’]/u.test(text)) return text
+  return text
+    .replace(/<br\s*\/?>/giu, '\n')
+    .replace(/\\\\r\\\\n/gu, '\n')
+    .replace(/\\\\n/gu, '\n')
+    .replace(/\\\\r/gu, '\n')
+    .replace(/\\r\\n/gu, '\n')
+    .replace(/\\n/gu, '\n')
+    .replace(/\\r/gu, '\n')
+    .replace(/\\t/gu, '\t')
+    .replace(/\r\n?/gu, '\n')
 }
 
 /**
@@ -962,8 +1032,13 @@ function sanitizeOutput(raw) {
 
   // 2. cosmetic cleanups, safe on either path
   text = text.replace(/\r\n?/gu, '\n').trim()
+  // A model that answers in one line with `\n` escapes produces a draft that renders as a
+  // single line (the composer only breaks on real newlines), so decode that BEFORE the
+  // line-based steps below — otherwise nothing has a line to cut on.
+  text = normalizeEscapedNewlines(text)
   const fenced = FENCE_WRAPPER.exec(text)
   if (fenced) text = (fenced.groups?.body ?? '').trim()
+  text = normalizeEscapedNewlines(text)
 
   const lines = text.split('\n')
   const dropLeadingBlankLines = () => {
