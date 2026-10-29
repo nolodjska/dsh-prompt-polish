@@ -87,7 +87,7 @@ await test('happy path returns {ok:true,text,model} and dispatches once', async 
   const session = makeSession()
   const llm = makeLlm({ chunks: HAPPY })
   const result = await optimizePrompt({ sessions: { get: () => session }, llm }, { sessionId: 'session-7', text: '帮我改一下这个按钮' })
-  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash', route: 'request-header' })
+  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain' })
   assert.equal(llm.captured.dispatches, 1, 'exactly one dispatch')
   assert.deepEqual(llm.captured.prepareArgs[0], { provider: 'deepseek', model: 'deepseek-v4.1-flash' })
   const options = llm.captured.options[0]
@@ -98,7 +98,8 @@ await test('happy path returns {ok:true,text,model} and dispatches once', async 
   assert.equal(options.sessionId, 'session-7')
   assert.equal(options.purpose, undefined, 'must not pass purpose')
   assert.equal(typeof options.system, 'string')
-  assert.ok(options.system.includes('只输出改写后的提示词正文'))
+  assert.ok(options.system.includes('[[PROMPT_BEGIN]]'), 'the answer form is spelled out')
+  assert.ok(options.system.includes('[[NOTES_BEGIN]]'), 'commentary has a sanctioned place')
   assert.equal(options.messages.length, 1)
   assert.equal(options.messages[0].role, 'user')
   assert.equal(options.messages[0].id, undefined, 'transient RequestUserInput has no id')
@@ -173,7 +174,7 @@ await test('delta-less adapter recovers text from block-end', async () => {
     { type: 'finish', reason: { kind: 'stop' } },
   ] })
   const result = await optimizePrompt({ sessions: { get: () => makeSession() }, llm }, { sessionId: 's', text: 'draft' })
-  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash', route: 'request-header' })
+  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain' })
 })
 
 // 6. output sanitizing: fence + language tag, preamble line, wrapping quotes
@@ -284,6 +285,91 @@ await test('over-cutting guards: legitimate prompts keep their own labels and ru
   // A closing conditional that is part of the instruction survives.
   const withConditional = '如果单元测试失败，先修实现再提交，不要放宽断言。'
   assert.equal((await replyFor(withConditional)).text, withConditional)
+})
+
+// ---------------------------------------------------------------------------
+// structured answer: only the marked block reaches the draft
+// ---------------------------------------------------------------------------
+
+/** Build a marker-envelope answer, the shape the system prompt asks for. */
+function envelope(promptText, notes = '') {
+  return [
+    '[[PROMPT_BEGIN]]',
+    promptText,
+    '[[PROMPT_END]]',
+    '',
+    '[[NOTES_BEGIN]]',
+    notes,
+    '[[NOTES_END]]',
+  ].join('\n')
+}
+
+await test('reads only the marked block and throws away everything around it', async () => {
+  const raw = [
+    '好的，我帮你改写一下。',
+    '',
+    envelope(
+      '把 src/a.ts 里的 maxTokens 改成 2048，并补一个覆盖超限分支的单元测试。',
+      '原句只说了“改一下”，我补上了文件与验收标准。',
+    ),
+    '',
+    '如果你要发给执行方，建议再补一句验收基准。',
+  ].join('\n')
+  const result = await replyFor(raw)
+  assert.equal(result.ok, true)
+  assert.equal(result.format, 'envelope')
+  assert.equal(result.text, '把 src/a.ts 里的 maxTokens 改成 2048，并补一个覆盖超限分支的单元测试。')
+  assert.doesNotMatch(result.text, /好的|改写一下|验收基准|原句/, 'no prose, no notes, no advice')
+})
+
+await test('the notes block is never shipped even when it is long and prompt-shaped', async () => {
+  const raw = envelope(
+    '请把 docs/README.md 的安装步骤补全到能一次跑通。',
+    '改动说明：把“补全”具体化了。\n\n更短的版本：补全 README 安装步骤。',
+  )
+  const result = await replyFor(raw)
+  assert.equal(result.text, '请把 docs/README.md 的安装步骤补全到能一次跑通。')
+})
+
+await test('tolerates decorated markers and an unterminated block', async () => {
+  assert.equal(
+    (await replyFor('**[[PROMPT_BEGIN]]**\n请升级 lodash 到 4.17.21。\n**[[PROMPT_END]]**')).text,
+    '请升级 lodash 到 4.17.21。',
+  )
+  assert.equal(
+    (await replyFor('[[PROMPT_BEGIN]]\n请升级 lodash 到 4.17.21。\n\n[[NOTES_BEGIN]]\n说明：安全修复。')).text,
+    '请升级 lodash 到 4.17.21。',
+  )
+})
+
+await test('falls back to a JSON answer when the model ignores the tags', async () => {
+  const raw = '{"prompt": "把一个长函数按职责拆成三个，并保持现有导出不变。", "notes": "拆分建议"}'
+  const result = await replyFor(raw)
+  assert.equal(result.format, 'json')
+  assert.equal(result.text, '把一个长函数按职责拆成三个，并保持现有导出不变。')
+
+  const fenced = '```json\n{"prompt": "第一行\\n第二行"}\n```'
+  const fencedResult = await replyFor(fenced)
+  assert.equal(fencedResult.format, 'json')
+  assert.equal(fencedResult.text, '第一行\n第二行', 'escaped newlines are decoded')
+})
+
+await test('falls back to a <prompt> element when there are no tags and no JSON', async () => {
+  const result = await replyFor('<prompt>\n把 CI 的 node 版本固定到 22 并缓存 pnpm store。\n</prompt>\n\n说明：顺便提速。')
+  assert.equal(result.format, 'xml')
+  assert.equal(result.text, '把 CI 的 node 版本固定到 22 并缓存 pnpm store。')
+})
+
+await test('a plain answer without any envelope still works (back-compat)', async () => {
+  const result = await replyFor('把 src/a.ts 的 maxTokens 调到 2048，并补一个单元测试。')
+  assert.equal(result.format, 'plain')
+  assert.equal(result.text, '把 src/a.ts 的 maxTokens 调到 2048，并补一个单元测试。')
+})
+
+await test('an empty block is rejected instead of shipping an empty draft', async () => {
+  const result = await replyFor(envelope('   ', '说明：我觉得原句已经够好了。'))
+  assert.equal(result.ok, false)
+  assert.match(result.message, /没有返回可用的提示词/)
 })
 
 // 7. failure branches

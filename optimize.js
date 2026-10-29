@@ -74,24 +74,46 @@ const TEXT_FILE_EXTENSIONS = new Set([
 ])
 
 /**
+ * Envelope markers. The Host keeps ONLY what sits between BEGIN and END, so any prose the
+ * model adds outside them (its favourite "改写如下：") is dropped by construction instead of
+ * being argued away by an instruction it may ignore. ASCII markers survive any provider and
+ * any temperature, and cannot be confused with the prompt's own text.
+ */
+const ENVELOPE_BEGIN = '[[PROMPT_BEGIN]]'
+const ENVELOPE_END = '[[PROMPT_END]]'
+const NOTES_BEGIN = '[[NOTES_BEGIN]]'
+const NOTES_END = '[[NOTES_END]]'
+
+/**
  * System instruction for the rewrite. Chinese, because the feature's user is Chinese.
  * It pins the non-negotiables: language+intent, concrete constraints, explicit structure,
- * output-only-the-prompt, and honest handling of the docked attachments.
+ * honest handling of the docked attachments — and the answer FORM the Host parses.
  */
 const SYSTEM_PROMPT = [
   '你是一个提示词改写助手：把用户给出的草稿改写成一条更清晰、更明确、可直接执行的提示词，供同一位用户发给 AI 助手。',
   '',
-  '必须遵守：',
+  '【回答格式：必须严格遵守】',
+  '你的整个回答只有下面这两块。[[PROMPT_BEGIN]] 之前和 [[PROMPT_END]] 之后不要有任何字符——不要“改写如下”“好的”“以下是改写结果”这类开场白，也不要结尾寒暄：',
+  '',
+  ENVELOPE_BEGIN,
+  '（这里放改写后的提示词正文，可以多行）',
+  ENVELOPE_END,
+  '',
+  NOTES_BEGIN,
+  '（可选：你对改动的说明写在这里，Host 会整块丢弃，不会展示给用户。不写就留空，但两块标记本身不能省。）',
+  NOTES_END,
+  '',
+  '【改写要求】',
   '1. 保持用户原本的语言（中文就输出中文、英文就输出英文）和原本意图，不改变任务目标，不增加用户没有要求的新任务。',
   '2. 原样保留草稿中的每一个具体约束：文件路径、文件名、函数名或标识符、项目名与人名、数字与版本号、命令、报错信息、验收标准、时间或范围限制。必须逐字保留，不得改写、合并、泛化或省略。',
   '3. 把口语化、跳跃、含糊的表达改写成明确的提示词：写清目标与背景（仅在草稿已包含时）、具体要做的事、约束与边界、以及可验证的完成标准。可以用分点让结构清楚，但不要堆砌空话套话。',
   '4. 不要编造草稿中没有的事实、接口、数据、依赖或需求；信息不足时保持克制，不要替用户做业务决定。',
-  '5. 只输出改写后的提示词正文。不要开场白、不要解释、不要总结、不要说“以下是改写结果”之类的话，不要用 ``` 代码围栏包裹，也不要给整段加引号。第一行就必须是提示词本身。',
-  '6. 可以借助用户消息中给出的“最近对话记录”消解草稿里的指代（如“这个/它/上面那个/刚才那个”），把它替换成明确的指称；但不要把对话内容复述进提示词，也不要提及“上下文”“对话记录”“历史”这类字眼。',
-  '7. 用户消息里可能带有“附件清单”和附件内容。附件只是帮助你理解草稿的背景：凡是草稿里提到某个附件（“这张图”“这个文件”“上面的报错”），改写后必须用清单中完全相同的附件名字来指代它；清单标注“模型不可见”的附件只能按名称与大小引用，不得猜测或编造它的内容；也不要把附件内容整段搬运进提示词。没有附件时就完全忽略这一条。',
-  '8. 草稿可能完全没有上下文：这是会话的第一条消息，没有历史对话，也可能没有任何附件。这种情况就直接依据草稿本身改写，正常输出提示词正文；不要说“缺少上下文”“信息不足”“请补充背景”，也不要向用户提问或索要补充材料。',
-  '9. 你的输出会被原样放回用户的输入框，直接发送给 AI 助手。因此下面这些内容一律禁止出现在输出里：改动说明、改写理由、与原句的对比、“更短的版本/备选版本/方案二”、对草稿的点评、给用户的建议（例如“建议再补一句验收标准”“如果这是发给执行方的…”）、以及任何形式的提问或反问。它们会被当成提示词的一部分发出去，属于严重错误。',
-  '10. 只给一个版本，就是你判断最好的那一版；不要同时给长版短版，也不要先写一版再附一版。草稿本身已经是一条明确指令时，只把它的措辞收紧、结构理清，力度和语气保持不变，不要把它改写成分析或建议。输出的最后一行必须就是提示词的最后一句话。',
+  '5. [[PROMPT_BEGIN]] 与 [[PROMPT_END]] 之间只能有提示词正文：不要放解释、改动说明、与原句的对比、备选版本（“更短的版本/方案二”）、对草稿的点评、给用户的建议、提问或反问。这些内容一律写进 NOTES 块，或者干脆不写。',
+  '6. 只给一个版本，就是你判断最好的那一版；不要同时给长版短版。草稿本身已经是一条明确指令时，只把它的措辞收紧、结构理清，力度和语气保持不变，不要把它改写成分析或建议。',
+  '7. 块内的提示词不要用 ``` 代码围栏包裹，不要给整段加引号，也不要再写一遍“提示词：”；第一行就是提示词本身，最后一行就是它的最后一句话。',
+  '8. 可以借助用户消息里给出的“最近对话记录”消解草稿里的指代（如“这个/它/上面那个/刚才那个”），把它替换成明确的指称；但不要把对话内容复述进提示词，也不要提及“上下文”“对话记录”“历史”这类字眼。',
+  '9. 用户消息里可能带有“附件清单”和附件内容。附件只是帮助你理解草稿的背景：凡是草稿里提到某个附件（“这张图”“这个文件”“上面的报错”），改写后必须用清单中完全相同的附件名字来指代它；清单标注“模型不可见”的附件只能按名称与大小引用，不得猜测或编造它的内容；也不要把附件内容整段搬运进提示词。没有附件时忽略这一条。',
+  '10. 草稿可能完全没有上下文：这是会话的第一条消息，没有历史对话，也可能没有任何附件。这种情况就直接依据草稿本身改写，正常输出提示词正文；不要说“缺少上下文”“信息不足”“请补充背景”，也不要向用户提问或索要补充材料。',
 ].join('\n')
 
 // ---------------------------------------------------------------------------
@@ -799,6 +821,88 @@ const QUOTE_PAIRS = [
 ]
 
 /**
+ * Read one envelope marker, tolerating the shapes a model actually produces: extra
+ * whitespace, a different case, or the markdown-escaped/decoration variants.
+ * @param {string} marker canonical marker text.
+ * @returns {RegExp} a global, case-insensitive matcher.
+ */
+function markerPattern(marker) {
+  const escaped = marker.replace(/[[\]]/gu, (character) => `\\${character}`)
+  return new RegExp(`[\\s*_\`>#]*${escaped}[\\s*_\`>#]*`, 'giu')
+}
+
+/**
+ * Pull the answer out of the two-block envelope.
+ *
+ * This is the whole point of the structured form: whatever the model writes outside
+ * `[[PROMPT_BEGIN]] … [[PROMPT_END]]` — "改写如下：", a shorter variant, an apology — simply
+ * cannot reach the draft, because only the marked region is read. The NOTES block is
+ * ignored by design: it exists so the model has somewhere legal to put its commentary.
+ *
+ * @param {string} text raw model output, newline-normalized.
+ * @returns {string | null} the prompt block, or null when the envelope is absent.
+ */
+function extractEnvelope(text) {
+  const begin = markerPattern(ENVELOPE_BEGIN)
+  const end = markerPattern(ENVELOPE_END)
+  const beginMatch = begin.exec(text)
+  if (beginMatch === null) return null
+  const from = beginMatch.index + beginMatch[0].length
+  const rest = text.slice(from)
+  const endMatch = end.exec(rest)
+  if (endMatch === null) {
+    // An unterminated block still tells us where the prompt starts; the NOTES markers and
+    // anything after them are cut so the commentary cannot ride along.
+    const notes = text.slice(from).search(markerPattern(NOTES_BEGIN))
+    return (notes < 0 ? rest : rest.slice(0, notes)).trim()
+  }
+  return rest.slice(0, endMatch.index).trim()
+}
+
+/**
+ * Pull the prompt out of a JSON answer, for models that prefer a form over tags.
+ *
+ * A bare `{"prompt": "…"}` (optionally inside a ```json fence) is accepted; the field is
+ * what matters, not the wrapper. Newlines arrive escaped, which is fine — they are decoded.
+ *
+ * @param {string} text raw model output.
+ * @returns {string | null} the prompt field, or null when no such object can be read.
+ */
+function extractJsonPrompt(text) {
+  const fenced = /```(?:json)?\s*\n?(?<body>[\s\S]*?)\n?```/iu.exec(text)
+  const candidates = []
+  if (fenced) candidates.push(fenced.groups?.body ?? '')
+  const first = text.indexOf('{')
+  const last = text.lastIndexOf('}')
+  if (first >= 0 && last > first) candidates.push(text.slice(first, last + 1))
+  for (const candidate of candidates) {
+    const source = candidate.trim()
+    if (!source.startsWith('{')) continue
+    let parsed
+    try {
+      parsed = JSON.parse(source)
+    } catch {
+      continue
+    }
+    const value = parsed !== null && typeof parsed === 'object' ? parsed.prompt : undefined
+    if (typeof value === 'string' && value.trim() !== '') return value
+  }
+  return null
+}
+
+/**
+ * Pull the prompt out of `<prompt>…</prompt>`, the third shape models fall back to.
+ * @param {string} text raw model output.
+ * @returns {string | null} the element body, or null.
+ */
+function extractXmlPrompt(text) {
+  const match = /<prompt>([\s\S]*?)<\/prompt>/iu.exec(text)
+  if (match === null) return null
+  const body = match[1] ?? ''
+  return body.trim() === '' ? null : body
+}
+
+/**
  * Remove a symmetric or asymmetric quote pair that brackets the WHOLE answer.
  * A symmetric mark only unwraps when it appears exactly twice, so a prompt that
  * legitimately mentions quotes keeps its content.
@@ -821,16 +925,43 @@ function stripWrappingQuotes(text) {
 }
 
 /**
- * Turn raw model text into the text the composer will receive: normalize newlines,
- * drop a wrapping fence, drop a preamble line, drop wrapping quotes, enforce the
- * length ceiling.
+ * Turn raw model text into the text the composer will receive.
+ *
+ * Order matters. The envelope (or JSON, or XML) is extracted FIRST, so anything the model
+ * wrote around its answer is never even considered; only then do the cosmetic cleanups run
+ * on the extracted block, followed by the meta-section cutters as a last resort for a model
+ * that ignored the form and put its commentary inside the prompt block itself.
+ *
  * @param {unknown} raw streamed text.
- * @returns {string} sanitized prompt text; empty when nothing usable came back.
+ * @returns {{ text: string, source: 'envelope' | 'json' | 'xml' | 'plain' }} the prompt text
+ *   (empty when nothing usable came back) and how it was obtained.
  */
 function sanitizeOutput(raw) {
   let text = typeof raw === 'string' ? raw : ''
   text = text.replace(/\r\n?/gu, '\n').trim()
 
+  // 1. structured extraction — the only step that decides WHAT the answer is
+  let source = 'plain'
+  const envelope = extractEnvelope(text)
+  if (envelope !== null) {
+    text = envelope
+    source = 'envelope'
+  } else {
+    const json = extractJsonPrompt(text)
+    if (json !== null) {
+      text = json
+      source = 'json'
+    } else {
+      const xml = extractXmlPrompt(text)
+      if (xml !== null) {
+        text = xml
+        source = 'xml'
+      }
+    }
+  }
+
+  // 2. cosmetic cleanups, safe on either path
+  text = text.replace(/\r\n?/gu, '\n').trim()
   const fenced = FENCE_WRAPPER.exec(text)
   if (fenced) text = (fenced.groups?.body ?? '').trim()
 
@@ -854,7 +985,7 @@ function sanitizeOutput(raw) {
 
   text = stripWrappingQuotes(text)
   if (text.length > OUTPUT_MAX_CHARS) text = `${text.slice(0, OUTPUT_MAX_CHARS - 1)}…`
-  return text.trim()
+  return { text: text.trim(), source }
 }
 
 /**
@@ -1068,10 +1199,12 @@ async function runOptimize(ctx, request) {
     }
 
     const cleaned = sanitizeOutput(streamed.length > 0 ? streamed : closedBlocks)
-    if (cleaned.length === 0) return fail('模型没有返回可用的提示词，请重试。')
-    // `route` is additive diagnostics: which tier of `resolveModelRoute` supplied the
-    // model. The page ignores it, tests and logs use it.
-    return { ok: true, text: cleaned, model, route: routeSource }
+    if (cleaned.text.length === 0) return fail('模型没有返回可用的提示词，请重试。')
+    // `route` reports which tier supplied the model, `format` which answer shape the model
+    // actually used. Both are additive diagnostics: the page ignores them, tests and logs use
+    // them — `format: 'plain'` means the model ignored the envelope and only the fallback
+    // cutters kept the commentary out.
+    return { ok: true, text: cleaned.text, model, route: routeSource, format: cleaned.source }
   } catch (error) {
     if (scope.timedOut()) return fail(timeoutMessage())
     if (signal !== null && typeof signal === 'object' && signal.aborted === true) return fail(cancelledMessage())
