@@ -41,7 +41,7 @@ POST /api/prompt-polish/optimize      requestBody: buffered
 - `type:"image"` 的 `data` 由 Composer 自己的 `encodeImage` 产出；`mediaType` 限于
   `image/png|jpeg|webp|gif`。
 - `type:"file"` 的 `receiptId` 来自后台文件上传队列，与用户此时点发送会提交的是同一个 id。
-- `answers` 由诊断面板的候选项点击产生，Host 侧逐条重新校验（见 §6）。
+- `answers` 由用户在诊断面板里**选中并确认**的候选产生（点击只选中，不发送；一次确认带走全部已选），Host 侧逐条重新校验（见 §6）。
 - 所有字段都视为不可信输入。
 
 ### 响应体（两种结果都是 HTTP 200）
@@ -185,7 +185,7 @@ ASK: 改哪个文件？ => client.js ;; optimize.js
   判定必须看到写入之前的草稿）。
 - 同一个 session 单飞：`begin()` 只从 `idle` 起，`beginRefine()` 只从 `done` 起，
   任何在途状态下的点击都是 no-op。
-- 点候选项 → `beginRefine()` → `POST { text: <最初草稿>, answers: [...已确认, 本次] }`；
+- 点候选 = 只写进组件本地 selection；点「确认并重写」→ `beginRefine()` → `POST { text: <最初草稿>, answers: [...已确认, ...本次选中的全部] }`；
   与首次优化共用 `sendOptimizeRequest()`（同一份 timeout / abort / 跨会话 / liveness 逻辑）。
 - 发起会话消失（关闭/删除）：完成时用会话目录快照校验，不在目录里就静默丢弃。
 - 骨架屏用 `[data-composer-overlay]` → `[data-composer-card]` → `[data-composer-input]`

@@ -1,7 +1,7 @@
 /**
  * v2 plan-panel harness: renders the three registered components of client.js with the
  * same tiny hook runtime as `client.behaviour.mjs` and drives the diagnostic dock —
- * rendering, one-click clarification (wire shape), dedupe of answered questions,
+ * rendering, select-then-confirm clarification (wire shape), dedupe of answered questions,
  * failure rollback, closing, cross-Session write-back and client-side truncation.
  * No DOM, no Harness, no network.
  */
@@ -156,6 +156,22 @@ const planRoots = (tree) => byClass(tree, 'pp-plan')
 const optionsOf = (tree) => byClass(tree, 'pp-plan-option')
 const chipsOf = (tree) => byClass(tree, 'pp-plan-chip')
 const questionsOf = (tree) => byClass(tree, 'pp-plan-q')
+const confirmOf = (tree) => byClass(tree, 'pp-plan-confirm')[0]
+const optionLabelled = (tree, label) => optionsOf(tree).find((node) => textOf(node) === label)
+/** Choose options by their visible label. Selection only — nothing is sent. */
+const choose = (tree, ...labels) => {
+  for (const label of labels) {
+    const node = optionLabelled(tree, label)
+    if (node === undefined) throw new Error(`option not rendered: ${label}`)
+    node.props.onClick()
+  }
+  flush()
+}
+/** The one control that sends the chosen answers. */
+const confirm = (tree) => {
+  confirmOf(tree).props.onClick()
+  flush()
+}
 /** The panel's one-line header. */
 const titleOf = (tree) => textOf(byClass(tree, 'pp-plan-title')[0])
 /** Unicode length, matching the client's clipping rule. */
@@ -216,6 +232,7 @@ const catalog = {
     's-u': { blank: false },
     's-v': { blank: false },
     's-w': { blank: false },
+    's-x': { blank: false },
   },
 }
 const setDraftExternal = (sessionId, text) => {
@@ -321,12 +338,42 @@ check(textOf(byClass(dock.tree, 'pp-plan-recommended')[0]) === '推荐', 'plan: 
 check(textOf(byClass(dock.tree, 'pp-plan-notes')[0]) === '改动：去掉了重复描述，补了验收标准', 'plan: notes rendered as one line')
 //#endregion
 
-//#region 3. clicking an option replays the ORIGINAL draft
-const firstOption = optionsOf(dock.tree).find((node) => textOf(node) === 'client.js')
+//#region 3. an option click only SELECTS; nothing is dispatched until 确认
+const firstOption = optionLabelled(dock.tree, 'client.js')
 check(firstOption !== undefined, 'refine: option button found')
+check(confirmOf(dock.tree) !== undefined, 'confirm: the panel has one 确认 control')
+check(confirmOf(dock.tree).props.disabled === true, 'confirm: it starts disabled (nothing chosen yet)')
+check(textOf(confirmOf(dock.tree)) === '确认并重写', 'confirm: label is localized')
+
+// THE BUG: a click used to be the confirmation, so browsing options executed the round.
+const issuedBeforeSelection = requestLog.length
+const draftBeforeSelection = drafts.get(SESSION)
 firstOption.props.onClick()
 flush()
-check(pendingRequest !== polishRequest, 'refine: a second request is issued')
+check(requestLog.length === issuedBeforeSelection, 'select: choosing an option issues no request')
+check(drafts.get(SESSION) === draftBeforeSelection, 'select: the draft is untouched while choosing')
+check(optionLabelled(dock.tree, 'client.js').props['aria-pressed'] === 'true', 'select: the chosen option is marked pressed')
+check(optionLabelled(dock.tree, 'optimize.js').props['data-selected'] === 'false', 'select: unselected options stay unmarked')
+check(confirmOf(dock.tree).props.disabled !== true, 'select: 确认 becomes available once something is chosen')
+check(textOf(confirmOf(dock.tree)) === '确认并重写（1）', 'select: the label counts the chosen answers')
+
+// Browsing further — switching, then deselecting — still sends nothing.
+optionLabelled(dock.tree, 'optimize.js').props.onClick()
+flush()
+check(requestLog.length === issuedBeforeSelection, 'select: switching the choice still sends nothing')
+check(optionLabelled(dock.tree, 'client.js').props['data-selected'] === 'false', 'select: the previous mark is cleared')
+check(optionLabelled(dock.tree, 'optimize.js').props['data-selected'] === 'true', 'select: only one option per question')
+optionLabelled(dock.tree, 'optimize.js').props.onClick()
+flush()
+check(confirmOf(dock.tree).props.disabled === true, 'select: deselecting turns 确认 off again')
+
+// Now the user confirms, and only now does the round leave the page.
+optionLabelled(dock.tree, 'client.js').props.onClick()
+flush()
+const staleConfirm = confirmOf(dock.tree)
+staleConfirm.props.onClick()
+flush()
+check(pendingRequest !== polishRequest, 'refine: 确认 issues the second request')
 check(bodyOf(pendingRequest).text === ORIGINAL, 'refine: wire text is the ORIGINAL draft, not the rewrite')
 check(JSON.stringify(answersOf(pendingRequest)) === JSON.stringify([{ q: '改哪个文件？', a: 'client.js' }]), 'refine: first answer sent as {q,a}')
 check(bodyOf(pendingRequest).sessionId === SESSION, 'refine: carries the Session id')
@@ -338,11 +385,12 @@ const busyChips = chipsOf(dock.tree)
 check(busyChips.length === 2 && busyChips.every((node) => node.props['data-disabled'] === 'true'), 'refine pending: assumption chips stay but are disabled')
 check(findButton(button.tree).props['data-phase'] === 'pending', 'refine pending: button shows the spinner')
 
-// single flight: a stale click (from the tree rendered before the request) issues nothing
+// single flight: the stale panel (rendered before the request) must not fire a second round
 const issuedBeforeStaleClick = requestLog.length
 firstOption.props.onClick()
+staleConfirm.props.onClick()
 flush()
-check(requestLog.length === issuedBeforeStaleClick, 'refine: a second click while in flight is a no-op')
+check(requestLog.length === issuedBeforeStaleClick, 'refine: a stale click while in flight is a no-op')
 //#endregion
 
 //#region 4. refine success refreshes the plan and dedupes answered questions
@@ -366,9 +414,8 @@ check(chipsOf(dock.tree).length === 1 && textOf(chipsOf(dock.tree)[0]) === '语�
 //#endregion
 
 //#region 5. answers accumulate; a new question appears
-const keepOption = optionsOf(dock.tree).find((node) => textOf(node) === '不保留')
-keepOption.props.onClick()
-flush()
+choose(dock.tree, '不保留')
+confirm(dock.tree)
 check(JSON.stringify(answersOf(pendingRequest)) === JSON.stringify([
   { q: '改哪个文件？', a: 'client.js' },
   { q: '要不要保留旧接口？', a: '不保留' },
@@ -392,9 +439,8 @@ check(questionsOf(dock.tree).length === 1 && textOf(questionsOf(dock.tree)[0]) =
 //#endregion
 
 //#region 6. a failed refine keeps the draft AND the panel
-const addOption = optionsOf(dock.tree).find((node) => textOf(node) === '加')
-addOption.props.onClick()
-flush()
+choose(dock.tree, '加')
+confirm(dock.tree)
 check(JSON.stringify(answersOf(pendingRequest)) === JSON.stringify([
   { q: '改哪个文件？', a: 'client.js' },
   { q: '要不要保留旧接口？', a: '不保留' },
@@ -415,9 +461,8 @@ check(findButton(button.tree).props['aria-label'] === t('button.undo'), 'refine 
 //#endregion
 
 //#region 7. a refine result lands in the ORIGINATING Session
-const notNow = optionsOf(dock.tree).find((node) => textOf(node) === '不加')
-notNow.props.onClick()
-flush()
+choose(dock.tree, '不加')
+confirm(dock.tree)
 const crossRequest = pendingRequest
 check(bodyOf(crossRequest).text === ORIGINAL, 'cross-session: refine replays the original draft')
 const writesBeforeSwitch = writes.length
@@ -483,8 +528,8 @@ pendingRequest.resolve(jsonResponse({
 await tick()
 flush()
 check(planRoots(staleDock.tree).length === 1, 'planless refine: the panel is up before the round')
-optionsOf(staleDock.tree).find((node) => textOf(node) === '新人').props.onClick()
-flush()
+choose(staleDock.tree, '新人')
+confirm(staleDock.tree)
 check(bodyOf(pendingRequest).text === STALE_ORIGINAL, 'planless refine: replays the original draft')
 pendingRequest.resolve(jsonResponse({ ok: true, text: '第二次改写结果', model: 'm' }))
 await tick()
@@ -579,6 +624,51 @@ check(planRoots(plainDock.tree).length === 0, 'no plan: done state renders no pa
 check(findButton(plainButton.tree).props['data-phase'] === 'done', 'no plan: undo still offered')
 unmount(plainButton)
 unmount(plainDock)
+//#endregion
+
+//#region 10b. several questions are answered in ONE confirmed round
+const multiSession = 's-x'
+drafts.set(multiSession, '把打包脚本整理一下')
+const multiButton = mount(Button, makeProps(multiSession))
+const multiDock = mount(Dock, makeProps(multiSession))
+flush()
+findButton(multiButton.tree).props.onClick()
+flush()
+pendingRequest.resolve(jsonResponse({
+  ok: true,
+  text: '整理好的脚本',
+  model: 'm',
+  plan: {
+    type: 'coding',
+    questions: [
+      { q: '改哪个文件？', options: ['build.sh', 'Makefile'] },
+      { q: '要不要加缓存？', options: ['加', '不加'] },
+      { q: '目标平台？', options: ['Windows', 'Linux'] },
+    ],
+  },
+}))
+await tick()
+flush()
+const issuedBeforeMulti = requestLog.length
+choose(multiDock.tree, 'build.sh', '加', 'Linux')
+check(requestLog.length === issuedBeforeMulti, 'multi: three choices still send nothing')
+check(textOf(confirmOf(multiDock.tree)) === '确认并重写（3）', 'multi: the confirm label counts all three')
+confirm(multiDock.tree)
+check(requestLog.length === issuedBeforeMulti + 1, 'multi: ONE request for all three answers')
+check(JSON.stringify(answersOf(pendingRequest)) === JSON.stringify([
+  { q: '改哪个文件？', a: 'build.sh' },
+  { q: '要不要加缓存？', a: '加' },
+  { q: '目标平台？', a: 'Linux' },
+]), 'multi: answers are sent in question order')
+check(bodyOf(pendingRequest).text === '把打包脚本整理一下', 'multi: still replays the original draft')
+pendingRequest.resolve(jsonResponse({ ok: true, text: '整理好的脚本 v2', model: 'm', plan: { type: 'coding' } }))
+await tick()
+flush()
+check(drafts.get(multiSession) === '整理好的脚本 v2', 'multi: one round covers everything')
+check(planRoots(multiDock.tree).length === 1, 'multi: no questions left, the panel stays as diagnostics')
+check(questionsOf(multiDock.tree).length === 0, 'multi: nothing is re-asked')
+unmount(multiButton)
+unmount(multiDock)
 //#endregion
 
 // Leave no request dangling (an unsettled fake request keeps the plugin's timeout alive).

@@ -12,8 +12,9 @@
  *   - conversation.input.dock      (list,   session) -> PolishPlanDock (id prompt-polish-plan, order 6)
  *
  * The dock is a full-width entry above the composer card: it carries the v2 diagnostic
- * panel (what was filled in, what still needs a decision) and answers one question per
- * click by replaying the ORIGINAL draft with the confirmed answers.
+ * panel (what was filled in, what still needs a decision) and sends the clarification answers
+ * the user CHOSE, in one round, by replaying the ORIGINAL draft. Clicking an option only marks
+ * it; nothing leaves the page until 确认 — a click must never double as the confirmation.
  *
  * The composer overlay outlet is a zero-height absolutely positioned strip at the
  * top of the composer card (`.GRgSLq_overlayAnchor{height:0;position:absolute;inset:0 0 auto}`
@@ -103,6 +104,9 @@ window.__ModuleLoader__.load({
     //#region store
     /** Frozen empty answer list: most states carry no confirmed answers. */
     const NO_ANSWERS = Object.freeze([])
+
+    /** Frozen empty selection: question → chosen option, before the user confirms. */
+    const EMPTY_SELECTION = Object.freeze({})
 
     /**
      * Keep only well-formed `{ q, a }` answers, in order.
@@ -789,6 +793,13 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 .pp-plan-option:focus{outline:none}
 .pp-plan-option:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .pp-plan-option:disabled{opacity:.5;cursor:default}
+.pp-plan-option[data-selected="true"]{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d)}
+.pp-plan-option[data-selected="true"]:hover{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d)}
+.pp-plan-confirm-row{display:flex;justify-content:flex-end;padding-top:2px}
+.pp-plan-confirm{box-sizing:border-box;padding:1px 10px;border:.5px solid var(--dsw-alias-state-business-primary);border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font:inherit;font-size:12px;line-height:18px;cursor:pointer}
+.pp-plan-confirm:disabled{opacity:.45;cursor:default;background:transparent;border-color:var(--dsw-alias-border-l2,rgba(255,255,255,.14));color:var(--dsw-alias-label-tertiary,#8a8a91)}
+.pp-plan-confirm:focus{outline:none}
+.pp-plan-confirm:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
 .pp-plan-notes{color:var(--dsw-alias-label-tertiary,#8a8a91);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pp-plan-busy{flex-direction:row;align-items:center;flex-wrap:wrap;gap:8px;color:var(--dsw-alias-label-tertiary,#8a8a91)}
 `
@@ -1344,6 +1355,10 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
       const sessionsSnapshot = typeof props.useSessions === 'function' ? props.useSessions((snapshot) => snapshot) : undefined
       const sessionsRef = React.useRef(sessionsSnapshot)
       sessionsRef.current = sessionsSnapshot
+      // Which option the user has CHOSEN, question → option. Local on purpose: a click marks a
+      // choice, it never sends anything. A click used to BE the confirmation, so the first stray
+      // click dispatched a rewrite round before the remaining questions could be read.
+      const [selection, setSelection] = React.useState(EMPTY_SELECTION)
 
       const phase = state.phase
       const plan = state.plan
@@ -1360,15 +1375,15 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         sessionsRef,
       )
 
-      const pick = (question, option) => {
-        if (store === null || phase !== 'done' || refining) return
-        const next = [...answers, { q: question, a: option }]
-        const started = store.beginRefine(sessionId, next)
-        if (started === null) return
-        startRefine(started).catch((failure) => {
-          // Defensive: every inner path settles itself, so reaching this means a bug.
-          console.error('[prompt-polish] clarification dispatch failed:', failure)
-          if (store !== null) store.fail(sessionId, started.token, t('error.generic'))
+      /** Mark an option (or unmark it, on a second click). Nothing is dispatched here. */
+      const toggleOption = (question, option) => {
+        setSelection((current) => {
+          if (current[question] === option) {
+            const next = { ...current }
+            delete next[question]
+            return next
+          }
+          return { ...current, [question]: option }
         })
       }
 
@@ -1411,6 +1426,23 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 
       const close = () => {
         if (store !== null) store.hidePlan(sessionId)
+        setSelection(EMPTY_SELECTION)
+      }
+
+      // Every chosen answer travels in ONE round, so answering three questions costs one call
+      // instead of three — and none of them leaves before the user says so.
+      const chosen = questions.filter((item) => typeof selection[item.q] === 'string')
+      const confirm = () => {
+        if (store === null || phase !== 'done' || refining || chosen.length === 0) return
+        const next = [...answers, ...chosen.map((item) => ({ q: item.q, a: selection[item.q] }))]
+        const started = store.beginRefine(sessionId, next)
+        if (started === null) return
+        setSelection(EMPTY_SELECTION)
+        startRefine(started).catch((failure) => {
+          // Defensive: every inner path settles itself, so reaching this means a bug.
+          console.error('[prompt-polish] clarification dispatch failed:', failure)
+          if (store !== null) store.fail(sessionId, started.token, t('error.generic'))
+        })
       }
 
       return h(
@@ -1454,30 +1486,54 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
             'div',
             { className: 'pp-plan-row' },
             h('span', { className: 'pp-plan-tag' }, t('dock.questions')),
-            h('div', { className: 'pp-plan-questions' }, questions.map((item, index) => h(
-              'div',
-              { className: 'pp-plan-question', key: index },
-              h('span', { className: 'pp-plan-q' }, item.q),
-              // options[0] is the Host's recommendation; the badge labels it, never replaces it.
-              item.options.map((option, optionIndex) => h(
-                React.Fragment,
-                { key: optionIndex },
-                optionIndex === 0 ? h('span', { className: 'pp-plan-recommended' }, t('dock.recommended')) : null,
+            h('div', { className: 'pp-plan-questions' }, [
+              ...questions.map((item, index) => h(
+                'div',
+                { className: 'pp-plan-question', key: index },
+                h('span', { className: 'pp-plan-q' }, item.q),
+                // options[0] is the Host's recommendation; the badge labels it, never replaces it.
+                item.options.map((option, optionIndex) => h(
+                  React.Fragment,
+                  { key: optionIndex },
+                  optionIndex === 0 ? h('span', { className: 'pp-plan-recommended' }, t('dock.recommended')) : null,
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'pp-plan-option',
+                      title: option,
+                      // Selection, not submission: the answer only leaves on 确认.
+                      'aria-pressed': selection[item.q] === option ? 'true' : 'false',
+                      'data-selected': selection[item.q] === option ? 'true' : 'false',
+                      onMouseDown: (event) => {
+                        event.preventDefault()
+                      },
+                      onClick: () => toggleOption(item.q, option),
+                    },
+                    option,
+                  ),
+                )),
+              )),
+              // One confirm for the whole panel: it stays disabled until something is chosen.
+              h(
+                'div',
+                { className: 'pp-plan-confirm-row', key: 'confirm' },
                 h(
                   'button',
                   {
                     type: 'button',
-                    className: 'pp-plan-option',
-                    title: option,
+                    className: 'pp-plan-confirm',
+                    disabled: chosen.length === 0,
+                    title: chosen.length === 0 ? t('dock.confirm.empty') : t('dock.confirm'),
                     onMouseDown: (event) => {
                       event.preventDefault()
                     },
-                    onClick: () => pick(item.q, option),
+                    onClick: confirm,
                   },
-                  option,
+                  chosen.length === 0 ? t('dock.confirm') : t('dock.confirm.count', { count: chosen.length }),
                 ),
-              )),
-            ))),
+              ),
+            ]),
           ),
           plan.notes === '' ? null : h(
             'div',
@@ -1529,6 +1585,9 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'dock.close': '收起诊断',
                 'dock.refining': '按你的选择重写…',
                 'dock.recommended': '推荐',
+                'dock.confirm': '确认并重写',
+                'dock.confirm.count': '确认并重写（{count}）',
+                'dock.confirm.empty': '先选一个答案，再确认',
                 'dock.type.coding': '编码任务',
                 'dock.type.writing': '写作任务',
                 'dock.type.analysis': '分析任务',
@@ -1554,6 +1613,9 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'dock.close': 'Hide diagnostics',
                 'dock.refining': 'Rewriting with your choices…',
                 'dock.recommended': 'Suggested',
+                'dock.confirm': 'Confirm and rewrite',
+                'dock.confirm.count': 'Confirm and rewrite ({count})',
+                'dock.confirm.empty': 'Pick an answer first, then confirm',
                 'dock.type.coding': 'Coding',
                 'dock.type.writing': 'Writing',
                 'dock.type.analysis': 'Analysis',
