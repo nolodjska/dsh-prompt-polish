@@ -76,6 +76,9 @@ POST /api/prompt-polish/optimize      requestBody: buffered
 2. **对话历史**：`session.deriveMessages()` 里最近 6 条 user/assistant 消息，只取文本块，
    单条 1500 字符、合计 6000 字符（从最新往回占预算），`JSON.stringify` 后放进用户消息，
    用 JSON 边界防止草稿伪造分隔符。一条都没有时不生成这一段，也不留空占位。
+   **草稿本身也用 `JSON.stringify` 包**（同理防越界），所以用户消息里紧跟着一句「不要沿用这个
+   包装：不要加引号、不要把换行写成 `\n`、不要写成 JSON」——不写这句，模型会照抄它看到的形状，
+   把整段答案回成一个转义过的 JSON 字符串。
 3. **输入框附件**：图片经 `ctx.attachments.admitPromptContent()` 拿持久引用，仅当
    `PreparedLlmCall.inputModalities` 含 `'image'` 时作为 `{type:'image', attachment}` 块随请求
    发出；文本类文件读前 8 KB（合计 24 KB）；其他文件只给名称与字节数。无论能否读到正文，

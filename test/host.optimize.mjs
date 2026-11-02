@@ -166,6 +166,14 @@ await test('empty history omits the digest section', async () => {
   assert.ok(input.includes('需要改写的草稿'))
 })
 
+await test('the user message warns against mirroring the draft container', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  await optimizePrompt({ sessions: { get: () => makeSession() }, llm }, { sessionId: 'session-7', text: 'draft' })
+  const input = llm.captured.options[0].messages[0].content[0].text
+  assert.ok(input.includes('不要沿用这个包装'), 'say it next to the container, or models copy it')
+  assert.ok(input.includes('"draft"'), 'the draft itself stays escaped inside the boundary')
+})
+
 // 5. delta-less adapter: text recovered from block-end
 await test('delta-less adapter recovers text from block-end', async () => {
   const llm = makeLlm({ chunks: [
@@ -450,6 +458,37 @@ await test('unwraps a hand-written JSON string that carries raw newlines', async
 await test('unwraps an announcing label followed by a quoted answer, without a fence', async () => {
   const result = await replyFor(`改写后的 JSON 字符串：\n${JSON.stringify(ESCAPED_PROMPT)}`)
   assert.equal(result.text, ESCAPED_PROMPT)
+})
+
+// The shapes that survived the first fix, reported from the composer as "still one line".
+
+/** The prompt from the bug report, as it must arrive in the composer. */
+const REPORTED_PROMPT = [
+  '/remotion-create https://github.com/nolodjska/dsh-prompt-polish',
+  '这是我独立开发的项目，请为它制作一支动画介绍视频。',
+  '',
+  '/kakouai-media "D:\\deepseek\\dsh-dafeiyu-main\\assets\\pet\\enter\\stay.png"',
+  '这张图是我的 DeepSeek 虚拟形象参考图，将用于 AI 生图。请让她担任介绍视频的主讲人。',
+].join('\n')
+
+await test('unwraps a quoted answer that was then JSON-escaped (two layers)', async () => {
+  // What the model actually sent: the prompt wrapped in quotes, and the whole thing stringified.
+  const raw = JSON.stringify(`"${REPORTED_PROMPT}"`)
+  const result = await replyFor(raw)
+  assert.equal(result.text, REPORTED_PROMPT, 'both the JSON layer and the quote pair are gone')
+  assert.ok(!result.text.includes('\\n'), 'no escape sequence is left')
+  assert.equal(result.text.split('\n').length, 5, 'five real lines')
+})
+
+await test('unwraps a JSON string nested inside a JSON string', async () => {
+  const result = await replyFor(JSON.stringify(JSON.stringify(REPORTED_PROMPT)))
+  assert.equal(result.text, REPORTED_PROMPT)
+})
+
+await test('a code fence survives inside a decoded answer', async () => {
+  const body = '把返回改成：\n```json\n{"ok": true}\n```\n其他不动。'
+  const result = await replyFor(JSON.stringify(body))
+  assert.equal(result.text, body, 'escapes decoded, the fence itself kept')
 })
 
 await test('a format label plus a fenced sample is prompt content, not a wrapper', async () => {
