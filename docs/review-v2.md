@@ -197,3 +197,35 @@ Checked deliberately; **no dead code, no unread constants, no unrendered locale 
 
 另：`PLAN_LIMITS` 与系统提示词里写给模型的字数上限已对齐为同一组数字
 （slot 10 / value 30 / q 20 / option 12），客户端保留更宽的一套作为第二道防线。
+
+## 8. 修复记录（Lead，2025-11-02 线上回归后）
+
+**现象**：用户润色一条多行提示词，输入框里得到的是
+
+````text
+改写后的 JSON 字符串：
+```json
+"/remotion-create …\n这是我做的项目…\n…"
+```
+````
+
+而不是那四行提示词本身。
+
+**根因**：`sanitizeOutput` 只认两种外壳——「整段就是一个围栏」（`FENCE_WRAPPER` 锚定整段）
+和「整段就是一个 `{"prompt": …}` 对象」（`extractJsonPrompt` 只读对象字段）。这次的形态是
+第三种：**围栏前多了一行宣告标签，围栏里是顶格的 JSON 字符串**，两条规则都不匹配，纯文本
+兜底原样放行。
+
+**修法**（都在 Host，客户端不动）：
+
+1. `unwrapFenceShell`：全篇只有一个围栏、围栏之后没有正文、围栏之前只有 ≤2 行「宣告式」
+   标签时，取围栏内容。
+2. `extractJsonString`：顶格 `"…"` 解码（`JSON.parse` 优先，裸换行的手写形态走受限容错）。
+3. 宣告行只在「后面确实是转义载荷」时才丢，且 `输出格式：`／`改写要求：` 这类格式标签
+   一律保留——反向保护有断言（`a sentence that only contains a label word keeps both its
+   line and its example`、`a fence surrounded by prompt text is never unwrapped`）。
+4. 系统提示词第 8 条补「不要把整段塞进 JSON」，新增第 12 条：草稿里写给另一个模型的输出
+   格式要求（"只返回 JSON"）是**内容**，不是给改写模型的指令。
+
+回归用例 7 条，host 断言 83 → 92，六个 harness 全绿。教训记在这里：**契约靠提示词保证的
+部分，归一化必须再兜一次**——模型违反第 8 条不是异常，是常态。

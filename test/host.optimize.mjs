@@ -408,6 +408,75 @@ await test('salvages a JSON answer whose string carries raw newlines', async () 
   assert.equal(result.text, '第一行\n第二行')
 })
 
+// ---------------------------------------------------------------------------
+// the answer arrives escaped: "改写后的 JSON 字符串：" + a fence + a bare JSON string
+// ---------------------------------------------------------------------------
+
+const ESCAPED_PROMPT = [
+  '/remotion-create https://github.com/nolodjska/dsh-prompt-polish',
+  '这是我做的项目，请为它制作一个动画介绍视频。',
+  '/kakouai-media "D:\\deepseek\\dsh-dafeiyu-main\\assets\\pet\\enter\\stay.png"',
+  '这张图是用于 AI 生图的 DeepSeek 虚拟形象参考图，请让她担任介绍视频的主讲人。',
+].join('\n')
+
+await test('unwraps a label + fence + JSON string answer into the real prompt', async () => {
+  const raw = `改写后的 JSON 字符串：\n\`\`\`json\n${JSON.stringify(ESCAPED_PROMPT)}\n\`\`\``
+  const result = await replyFor(raw)
+  assert.equal(result.ok, true)
+  assert.equal(result.format, 'json')
+  assert.equal(result.text, ESCAPED_PROMPT, 'escapes decoded, label and fence gone')
+  assert.ok(!result.text.includes('改写后的'), 'no announcing label in the draft')
+  assert.ok(!result.text.includes('```'), 'no fence in the draft')
+  assert.ok(!result.text.includes('\\n'), 'no escape sequence left in the draft')
+})
+
+await test('unwraps the same escaped answer when it sits inside the envelope', async () => {
+  const raw = `[[PROMPT_BEGIN]]\n改写后的 JSON 字符串：\n\`\`\`json\n${JSON.stringify(ESCAPED_PROMPT)}\n\`\`\`\n[[PROMPT_END]]`
+  const result = await replyFor(raw)
+  assert.equal(result.format, 'envelope')
+  assert.equal(result.text, ESCAPED_PROMPT)
+})
+
+await test('unwraps a bare JSON string with no fence and no label', async () => {
+  const result = await replyFor(JSON.stringify(ESCAPED_PROMPT))
+  assert.equal(result.text, ESCAPED_PROMPT)
+})
+
+await test('unwraps a hand-written JSON string that carries raw newlines', async () => {
+  const result = await replyFor(`"第一行\n第二行"\n`)
+  assert.equal(result.text, '第一行\n第二行')
+})
+
+await test('unwraps an announcing label followed by a quoted answer, without a fence', async () => {
+  const result = await replyFor(`改写后的 JSON 字符串：\n${JSON.stringify(ESCAPED_PROMPT)}`)
+  assert.equal(result.text, ESCAPED_PROMPT)
+})
+
+await test('a format label plus a fenced sample is prompt content, not a wrapper', async () => {
+  const raw = '输出格式：\n```json\n{"ok": true}\n```'
+  const result = await replyFor(raw)
+  assert.ok(result.text.includes('输出格式：'), 'the label belongs to the prompt')
+  assert.ok(result.text.includes('{"ok": true}'), 'the sample is kept')
+})
+
+await test('a fence surrounded by prompt text is never unwrapped', async () => {
+  const raw = '请按下面的示例改：\n```js\nconst a = 1\n```\n其余保持不变。'
+  const result = await replyFor(raw)
+  assert.equal(result.text, raw)
+})
+
+await test('a sentence that only contains a label word keeps both its line and its example', async () => {
+  const raw = '把接口返回改成：\n```json\n{"ok": true}\n```\n其他不动。'
+  const result = await replyFor(raw)
+  assert.equal(result.text, raw)
+})
+
+await test('keeps a prompt that legitimately mentions a JSON string', async () => {
+  const raw = '把 response 里的 "ok": true 改成 "ok": false，只改这一处。'
+  const result = await replyFor(raw)
+  assert.equal(result.text, raw)
+})
+
 await test('keeps a prompt that only MENTIONS an escape sequence', async () => {
   const raw = "[[PROMPT_BEGIN]]把 '\\n' 这个转义原样保留，只改 split 的实现[[PROMPT_END]]"
   const result = await replyFor(raw)

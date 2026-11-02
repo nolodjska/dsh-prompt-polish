@@ -129,9 +129,10 @@ ASK: 改哪个文件？ => client.js ;; optimize.js
 | --- | --- | --- |
 | 1 | `extractEnvelope` | 标记容错：前后 `**`/```/空白、大小写、缺 END |
 | 1b | `stripPlanRecords` | 模型把 PLAN 行写进正文时按行前缀剔除（`ASSUME:`/`ASK:`/`TYPE:`/`NOTE:`） |
+| 1c | `unwrapFenceShell` / `extractJsonString` | 「改写后的 JSON 字符串：」这类**宣告行 + 单个围栏**，以及围栏内的**顶格 JSON 字符串**：先剥壳再解码 `\"` 与 `\n`。仅当围栏/引号之外没有正文、且宣告行不像「输出格式：」这类格式标签时才剥 |
 | 2 | 格式清理 | 解码 `\n` 转义、去整体围栏、去开场白行、去包裹引号 |
 | 3 | `cutMetaSections` / `cutTrailingAdvice` | 「改动说明/更短的版本/如果…建议…」等兜底截断 |
-| — | 降级 | 信封 → `{"prompt": …}` JSON（含手写容错）→ `<prompt>` → 纯文本 |
+| — | 降级 | 信封 → 顶层 JSON 字符串 → `{"prompt": …}` JSON（含手写容错）→ `<prompt>` → 纯文本 |
 
 `parsePlan(raw)` 决定诊断，全部字段都在这里被裁剪（`PLAN_LIMITS`）：
 
