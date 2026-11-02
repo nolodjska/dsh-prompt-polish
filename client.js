@@ -9,6 +9,11 @@
  * conversation UI package):
  *   - conversation.input.activity (single, session) -> PolishButton
  *   - conversation.input.overlay  (list,   session) -> PolishSkeleton (id prompt-polish-skeleton, order 50)
+ *   - conversation.input.dock      (list,   session) -> PolishPlanDock (id prompt-polish-plan, order 6)
+ *
+ * The dock is a full-width entry above the composer card: it carries the v2 diagnostic
+ * panel (what was filled in, what still needs a decision) and answers one question per
+ * click by replaying the ORIGINAL draft with the confirmed answers.
  *
  * The composer overlay outlet is a zero-height absolutely positioned strip at the
  * top of the composer card (`.GRgSLq_overlayAnchor{height:0;position:absolute;inset:0 0 auto}`
@@ -53,6 +58,31 @@ window.__ModuleLoader__.load({
     /** Wire media types the composer's own encoder can produce. */
     const WIRE_IMAGE_MEDIA_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
 
+    /** Confirmed clarification answers per request (design v2 §2: at most 6). */
+    const MAX_ANSWERS = 6
+    /**
+     * Client-side plan ceilings. The Host trims every plan field first (design v2 §4.2);
+     * these repeat the same limits so an untrimmed plan still cannot break the layout.
+     * Rendering is the second line of defence, not the first.
+     */
+    const PLAN_MAX_NOTES = 120
+    const PLAN_MAX_ASSUMPTIONS = 6
+    const PLAN_MAX_SLOT = 16
+    const PLAN_MAX_VALUE = 60
+    const PLAN_MAX_QUESTIONS = 3
+    const PLAN_MAX_QUESTION = 40
+    const PLAN_MAX_OPTIONS = 4
+    const PLAN_MAX_OPTION = 20
+    /** Task types the model may report; any other value omits the type label entirely. */
+    const PLAN_TYPES = new Set(['coding', 'writing', 'analysis', 'image', 'other'])
+    /** Single-character ellipsis appended to a clipped plan field. */
+    const ELLIPSIS = '…'
+    /**
+     * Shortest draft worth polishing: below this the model has nothing to work with, so the
+     * control stays disabled instead of spending a call on a fragment of a word.
+     */
+    const MIN_DRAFT_CHARS = 4
+
     /** @type {ReturnType<typeof createPolishStore> | null} */
     let store = null
     /** @type {((key: string) => string) | null} */
@@ -66,17 +96,64 @@ window.__ModuleLoader__.load({
     let pluginCtx = null
 
     //#region store
+    /** Frozen empty answer list: most states carry no confirmed answers. */
+    const NO_ANSWERS = Object.freeze([])
+
     /**
-     * One immutable state per session id, shared by the toolbar button and the
-     * composer overlay (they are separate slot entries). Owned by `apply` via
-     * ctx.effect, which aborts every in-flight request on unload.
+     * Keep only well-formed `{ q, a }` answers, in order.
      *
-     * state = { phase: 'idle', error: string | null }
-     *       | { phase: 'pending', token, controller, original, error: null }
-     *       | { phase: 'done', original, written, error: null }
+     * At most MAX_ANSWERS are retained — the protocol ceiling (design v2 §2) — and when
+     * more arrive the NEWEST win, because the user's latest decisions are the ones the
+     * next round must honour. A repeated question keeps its latest answer.
+     * @param {unknown} value candidate answer list.
+     * @returns {readonly {q: string, a: string}[]} the usable answers (frozen empty when none).
+     */
+    function normalizeAnswers(value) {
+      if (!Array.isArray(value) || value.length === 0) return NO_ANSWERS
+      const out = []
+      const indexOf = new Map()
+      for (const item of value) {
+        if (item === null || typeof item !== 'object') continue
+        if (typeof item.q !== 'string' || item.q === '') continue
+        if (typeof item.a !== 'string' || item.a === '') continue
+        if (indexOf.has(item.q)) {
+          out[indexOf.get(item.q)] = { q: item.q, a: item.a }
+          continue
+        }
+        indexOf.set(item.q, out.length)
+        out.push({ q: item.q, a: item.a })
+      }
+      if (out.length === 0) return NO_ANSWERS
+      return out.length > MAX_ANSWERS ? out.slice(out.length - MAX_ANSWERS) : out
+    }
+
+    /**
+     * One immutable state per session id, shared by the toolbar button, the composer
+     * overlay and the clarification dock (three separate slot entries). Owned by `apply`
+     * via ctx.effect, which aborts every in-flight request on unload.
+     *
+     * state = { phase: 'idle', error: string | null, original: null, written: null,
+     *           plan: null, answers: NO_ANSWERS, planHidden: false }
+     *       | { phase: 'pending', mode: 'polish' | 'refine', token, controller,
+     *           original, requestText, written, plan, answers, previousAnswers?,
+     *           planHidden, applied?, error: null }
+     *       | { phase: 'done', token, controller: null, original, written,
+     *           plan, answers, planHidden, applied, error: string | null }
+     *
+     * `original` is always the draft captured by the FIRST rewrite, so undo keeps
+     * returning to what the user typed even after a clarification round. `requestText`
+     * is what the wire replays: the draft for polish, the original draft for refine.
      */
     function createPolishStore() {
-      const IDLE = Object.freeze({ phase: 'idle', error: null, original: null, written: null })
+      const IDLE = Object.freeze({
+        phase: 'idle',
+        error: null,
+        original: null,
+        written: null,
+        plan: null,
+        answers: NO_ANSWERS,
+        planHidden: false,
+      })
       const entries = new Map()
       const listeners = new Set()
       let seq = 0
@@ -120,7 +197,7 @@ window.__ModuleLoader__.load({
             listeners.delete(listener)
           }
         },
-        /** Start a rewrite; returns the pending entry (null when one is already live). */
+        /** Start a first rewrite; returns the pending entry (null when one is already live). */
         begin(sessionId, draft) {
           if (disposed || sessionId === undefined) return null
           const live = read(sessionId)
@@ -128,9 +205,52 @@ window.__ModuleLoader__.load({
           seq += 1
           const entry = {
             phase: 'pending',
+            mode: 'polish',
             error: null,
             original: draft,
+            requestText: draft,
             written: null,
+            plan: null,
+            answers: NO_ANSWERS,
+            planHidden: false,
+            token: seq,
+            controller: new AbortController(),
+          }
+          entries.set(sessionId, entry)
+          notify()
+          return entry
+        },
+        /**
+         * Start a clarification round from a finished rewrite.
+         *
+         * `begin` only starts from IDLE, because a first rewrite replaces a draft the user
+         * has not seen replaced yet; a refine starts from DONE by design — it replays the
+         * ORIGINAL draft with the answers the user just confirmed. Single-flight still
+         * holds: a click while any request is live (polish or refine) is a no-op, so two
+         * clarification rounds can never run concurrently in one Session.
+         */
+        beginRefine(sessionId, answers) {
+          if (disposed || sessionId === undefined) return null
+          const live = read(sessionId)
+          if (live.phase !== 'done') return null
+          const confirmed = normalizeAnswers(answers)
+          if (confirmed.length === 0) return null
+          seq += 1
+          const entry = {
+            phase: 'pending',
+            mode: 'refine',
+            error: null,
+            original: live.original,
+            requestText: live.original,
+            // Kept so a failed refine can restore the previous finished state verbatim.
+            written: live.written,
+            plan: live.plan,
+            answers: confirmed,
+            // The failed round's own answer must NOT stick: restoring the previous list
+            // keeps the question the user just clicked askable, so they can retry.
+            previousAnswers: live.answers,
+            planHidden: live.planHidden === true,
+            applied: live.applied === true,
             token: seq,
             controller: new AbortController(),
           }
@@ -141,15 +261,25 @@ window.__ModuleLoader__.load({
         isCurrent(sessionId, token) {
           return current(sessionId, token) !== null
         },
-        /** Rewrite landed: remember what we replaced and what we wrote. */
-        succeed(sessionId, token, written) {
+        /**
+         * Rewrite landed: remember what we replaced and what we wrote.
+         * @param {object | null} plan normalized diagnostic (null when the Host sent none).
+         */
+        succeed(sessionId, token, written, plan = null) {
           const live = current(sessionId, token)
           if (live === null) return false
+          const refining = live.mode === 'refine'
           entries.set(sessionId, {
             phase: 'done',
             error: null,
             original: live.original,
             written,
+            // The fresh diagnostic describes the text just written. A reply without PLAN
+            // (degradation, not failure) means "nothing to show": keeping the previous
+            // plan would describe a rewrite that is no longer in the draft.
+            plan,
+            answers: refining ? live.answers : NO_ANSWERS,
+            planHidden: refining ? live.planHidden : false,
             token,
             controller: null,
             // The draft is written by the component of the Session that owns this entry,
@@ -167,18 +297,61 @@ window.__ModuleLoader__.load({
           notify()
           return true
         },
+        /**
+         * Put the diagnostic panel away without touching the undo affordance: the draft
+         * stays rewritten and ↺ still restores the user's original text.
+         */
+        hidePlan(sessionId) {
+          const live = read(sessionId)
+          if (live.phase !== 'done' || live.planHidden === true) return false
+          entries.set(sessionId, { ...live, planHidden: true })
+          notify()
+          return true
+        },
         /** Rewrite failed: keep the draft untouched, surface one short message. */
         fail(sessionId, token, message) {
           const live = current(sessionId, token)
           if (live === null) return false
-          entries.set(sessionId, { phase: 'idle', error: message, original: null, written: null })
+          if (live.mode === 'refine') {
+            // A failed clarification must not throw away the diagnostic or the undo
+            // affordance the user already had, and it must not touch the draft: restore
+            // the previous finished state and surface the message on the same channel.
+            entries.set(sessionId, {
+              phase: 'done',
+              error: message,
+              original: live.original,
+              written: live.written,
+              plan: live.plan,
+              answers: live.previousAnswers ?? NO_ANSWERS,
+              planHidden: live.planHidden,
+              token: live.token,
+              controller: null,
+              applied: live.applied === true,
+            })
+          } else {
+            entries.set(sessionId, {
+              phase: 'idle',
+              error: message,
+              original: null,
+              written: null,
+              plan: null,
+              answers: NO_ANSWERS,
+              planHidden: false,
+            })
+          }
           notify()
           return true
         },
         clearError(sessionId) {
           const live = read(sessionId)
-          if (live.phase !== 'idle' || live.error === null) return
-          drop(sessionId)
+          if (live.error === null) return
+          // A refine failure restores DONE (panel + undo stay); only the message expires.
+          if (live.phase === 'done') {
+            entries.set(sessionId, { ...live, error: null })
+            notify()
+            return
+          }
+          if (live.phase === 'idle') drop(sessionId)
         },
         /** Back to idle (undo consumed, user edited the rewritten text, or send). */
         dismiss(sessionId) {
@@ -206,7 +379,15 @@ window.__ModuleLoader__.load({
 
     //#region hooks
     /** The store is null only between plugin disposal and component unmount. */
-    const IDLE_STATE = Object.freeze({ phase: 'idle', error: null, original: null, written: null })
+    const IDLE_STATE = Object.freeze({
+      phase: 'idle',
+      error: null,
+      original: null,
+      written: null,
+      plan: null,
+      answers: NO_ANSWERS,
+      planHidden: false,
+    })
 
     /** Subscribe to the per-session polish state (stable object identity while unchanged). */
     function usePolishState(sessionId) {
@@ -348,6 +529,202 @@ window.__ModuleLoader__.load({
     }
     //#endregion
 
+    //#region plan
+    /**
+     * Clip one plan field to its display ceiling, appending an ellipsis when it was longer.
+     * Counts Unicode code points so a clipped surrogate pair is never cut in half.
+     * @param {unknown} value candidate field.
+     * @param {number} max maximum number of characters.
+     * @returns {string} trimmed, clipped text (empty when the field is absent).
+     */
+    function clipPlanText(value, max) {
+      if (typeof value !== 'string') return ''
+      const text = value.trim()
+      if (text === '') return ''
+      const chars = Array.from(text)
+      if (chars.length <= max) return text
+      return chars.slice(0, Math.max(1, max - 1)).join('') + ELLIPSIS
+    }
+
+    /**
+     * Normalize the Host's optional `plan` block into the shape the dock renders.
+     *
+     * The Host already parses, sanitizes and trims it (design v2 §4); this pass exists so
+     * an older or looser Host build cannot paint garbage or an unbounded layout. A plan
+     * with nothing to show becomes null, which is exactly the v1 presentation (no panel).
+     *
+     * @param {unknown} value raw `plan` field from the wire.
+     * @returns {{ type: string, notes: string,
+     *   assumptions: { slot: string, value: string }[],
+     *   questions: { q: string, options: string[] }[] } | null} the normalized plan, or null.
+     */
+    function readPlan(value) {
+      if (value === null || typeof value !== 'object') return null
+      const rawType = typeof value.type === 'string' ? value.type.trim().toLowerCase() : ''
+      const type = PLAN_TYPES.has(rawType) ? rawType : ''
+      const notes = clipPlanText(value.notes, PLAN_MAX_NOTES)
+
+      const assumptions = []
+      if (Array.isArray(value.assumptions)) {
+        for (const item of value.assumptions) {
+          if (assumptions.length >= PLAN_MAX_ASSUMPTIONS) break
+          if (item === null || typeof item !== 'object') continue
+          const slot = clipPlanText(item.slot, PLAN_MAX_SLOT)
+          const text = clipPlanText(item.value, PLAN_MAX_VALUE)
+          if (slot === '' || text === '') continue
+          assumptions.push({ slot, value: text })
+        }
+      }
+
+      const questions = []
+      if (Array.isArray(value.questions)) {
+        for (const item of value.questions) {
+          if (questions.length >= PLAN_MAX_QUESTIONS) break
+          if (item === null || typeof item !== 'object') continue
+          const q = clipPlanText(item.q, PLAN_MAX_QUESTION)
+          if (q === '') continue
+          const options = []
+          if (Array.isArray(item.options)) {
+            for (const option of item.options) {
+              if (options.length >= PLAN_MAX_OPTIONS) break
+              const text = clipPlanText(option, PLAN_MAX_OPTION)
+              if (text !== '') options.push(text)
+            }
+          }
+          // A question without an option has nothing to click, so it cannot be answered.
+          if (options.length === 0) continue
+          questions.push({ q, options })
+        }
+      }
+
+      if (type === '' && notes === '' && assumptions.length === 0 && questions.length === 0) return null
+      return { type, notes, assumptions, questions }
+    }
+    //#endregion
+
+    //#region request
+    /**
+     * One optimize round trip, shared by the v1 control (polish) and the v2 dock (refine):
+     * same route, same timeout budget (images get more), same abort rules, same
+     * cross-Session write-back and the same Session-liveness check.
+     *
+     * Everything below belongs to the Session that STARTED the request, whichever Session
+     * is open when it settles. The store entry is settled here; the caller only resolves
+     * the attachment payload and hands over the body.
+     *
+     * @param {string} origin Session id that owns this request entry.
+     * @param {number} token store token of that pending entry.
+     * @param {AbortController} controller abort handle owned by the entry.
+     * @param {object} body JSON body (`sessionId`, `text`, optional `attachments`/`answers`).
+     * @param {(key: string, params?: object) => string} t translator bound to this locale.
+     * @param {{ current: unknown }} sessionsRef live Session catalog snapshot.
+     * @returns {Promise<void>} resolves once the store is settled; never rejects.
+     */
+    async function sendOptimizeRequest(origin, token, controller, body, t, sessionsRef) {
+      let timedOut = false
+      let timer
+      const settle = () => {
+        if (timer !== undefined) clearTimeout(timer)
+        timer = undefined
+      }
+      const hasImages = Array.isArray(body.attachments) && body.attachments.some((item) => item.type === 'image')
+      timer = setTimeout(() => {
+        timedOut = true
+        try {
+          controller.abort()
+        } catch (_error) {
+          /* already settled */
+        }
+      }, hasImages ? TIMEOUT_MS_WITH_IMAGES : TIMEOUT_MS)
+
+      // Everything below belongs to the Session that STARTED this request, whichever
+      // Session is open when it settles.
+      const originAlive = () => isSessionAlive(sessionsRef?.current, origin)
+
+      let response
+      let raw = ''
+      try {
+        response = await fetch(ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+        raw = await response.text()
+      } catch (failure) {
+        settle()
+        if (store === null || !store.isCurrent(origin, token)) return
+        if (!originAlive()) {
+          // The Session was closed/deleted while the request ran: drop it silently.
+          store.discard(origin)
+          return
+        }
+        if (failure !== null && failure !== undefined && failure.name === 'AbortError') {
+          if (timedOut) store.fail(origin, token, t('error.timeout'))
+          else store.dismiss(origin)
+          return
+        }
+        store.fail(origin, token, t('error.network'))
+        return
+      }
+      settle()
+      if (store === null || !store.isCurrent(origin, token)) return
+      // A vanished Session never gets a state entry of its own, never writes a draft and
+      // never shows an error: the result is simply discarded.
+      if (!originAlive()) {
+        store.discard(origin)
+        return
+      }
+      let payload = null
+      if (raw !== '') {
+        try {
+          payload = JSON.parse(raw)
+        } catch (_error) {
+          payload = null
+        }
+      }
+      if (payload !== null && typeof payload === 'object' && payload.ok === false) {
+        const message = typeof payload.message === 'string' && payload.message !== '' ? payload.message : t('error.generic')
+        store.fail(origin, token, message)
+        return
+      }
+      const text = payload !== null && typeof payload === 'object' && payload.ok === true && typeof payload.text === 'string' ? payload.text : ''
+      if (!response.ok || text.trim() === '') {
+        store.fail(origin, token, t('error.generic'))
+        return
+      }
+      // Recorded against the origin Session. The write itself happens in that Session's
+      // component effect, so it lands in the right draft even when the user is elsewhere
+      // right now — and it lands exactly once.
+      store.succeed(origin, token, text, readPlan(payload.plan))
+    }
+
+    /**
+     * Resolve the draft's docked attachments (best effort) and dispatch one round — the
+     * single entry point shared by the v1 control and the clarification dock, so both
+     * obey the same synchronous-when-empty behaviour and the same post-await re-check.
+     *
+     * @param {string} sessionId Session that owns the pending entry.
+     * @param {{ token: number, controller: AbortController }} started the pending entry.
+     * @param {readonly string[]} ids draft-local attachment ids in rail order.
+     * @param {object} body JSON body without attachments (filled in here).
+     * @param {(key: string, params?: object) => string} t translator bound to this locale.
+     * @param {{ current: unknown }} sessionsRef live Session catalog snapshot.
+     * @returns {Promise<void>} resolves once the store is settled; never rejects.
+     */
+    async function dispatchOptimize(sessionId, started, ids, body, t, sessionsRef) {
+      let attachments = NO_ATTACHMENTS
+      if (ids.length > 0) {
+        attachments = await resolvePolishAttachments(ids)
+        // Full re-check after the await: the session may have changed, the request may
+        // have been aborted, or the plugin may have been disposed meanwhile.
+        if (store === null || !store.isCurrent(sessionId, started.token)) return
+      }
+      if (attachments.length > 0) body.attachments = attachments
+      return sendOptimizeRequest(sessionId, started.token, started.controller, body, t, sessionsRef)
+    }
+    //#endregion
+
     //#region styles
     const BUTTON_CSS = `
 .pp-root{display:inline-flex;align-items:center;gap:8px;min-width:0}
@@ -377,6 +754,37 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 .pp-bar:nth-child(3n+3){animation-delay:.24s}
 @keyframes pp-shimmer{from{background-position:120% 0}to{background-position:-120% 0}}
 @media (prefers-reduced-motion: reduce){.pp-skeleton{transition:none}.pp-bar{animation:none;background:var(--dsw-alias-interactive-bg-hover)}}
+`
+
+    /**
+     * The diagnostic panel sits in `conversation.input.dock` and is sized like the shipped
+     * panels above the composer card (TodoPanel/QueueDock): full width of the composer
+     * column, the menu surface, one hairline border, rounded top corners.
+     */
+    const PLAN_CSS = `
+.pp-plan{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,0px) - var(--dsh-composer-side-clearance,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px));max-width:calc(var(--dsh-composer-card-max-width,760px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px));flex:none;display:flex;flex-direction:column;gap:6px;margin:0 auto;padding:8px 12px 10px;border:.5px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));border-radius:var(--dsw-radius-lg,12px);background:var(--dsw-specific-menu,#1f1f22);backdrop-filter:var(--dsw-menu-backdrop-filter,none);box-shadow:var(--dsw-elevation-panel,none);color:var(--dsw-alias-label-secondary,#a9a9b0);font-size:12px;line-height:20px;overflow:hidden}
+.pp-plan-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.pp-plan-title{flex:auto;min-width:0;color:var(--dsw-alias-label-primary,#f2f2f5);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pp-plan-close{box-sizing:border-box;flex:none;width:20px;height:20px;display:grid;place-items:center;padding:0;margin:0;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8a91);font:inherit;font-size:14px;line-height:1;cursor:pointer}
+.pp-plan-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary,#f2f2f5)}
+.pp-plan-close:focus{outline:none}
+.pp-plan-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.pp-plan-row{display:flex;align-items:flex-start;gap:8px;min-width:0}
+.pp-plan-tag{flex:none;color:var(--dsw-alias-label-tertiary,#8a8a91);font-size:12px;line-height:20px}
+.pp-plan-chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.pp-plan-chip{max-width:100%;padding:1px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06));color:var(--dsw-alias-label-secondary,#a9a9b0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp-plan-chip[data-disabled="true"]{opacity:.55}
+.pp-plan-questions{display:flex;flex-direction:column;gap:4px;min-width:0}
+.pp-plan-question{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
+.pp-plan-q{color:var(--dsw-alias-label-primary,#f2f2f5);font-size:12px;line-height:20px}
+.pp-plan-recommended{flex:none;padding:0 6px;border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font-size:11px;line-height:16px;opacity:.9}
+.pp-plan-option{box-sizing:border-box;max-width:100%;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#a9a9b0);font:inherit;font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.pp-plan-option:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary,#f2f2f5);border-color:var(--dsw-alias-state-business-primary)}
+.pp-plan-option:focus{outline:none}
+.pp-plan-option:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.pp-plan-option:disabled{opacity:.5;cursor:default}
+.pp-plan-notes{color:var(--dsw-alias-label-tertiary,#8a8a91);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pp-plan-busy{flex-direction:row;align-items:center;flex-wrap:wrap;gap:8px;color:var(--dsw-alias-label-tertiary,#8a8a91)}
 `
     //#endregion
 
@@ -528,125 +936,21 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 
       const polishing = phase === 'pending'
       const undoable = phase === 'done'
-      const blank = draft.trim() === ''
-      const disabled = polishing || props.locked === true || (!undoable && (blank || sessionId === undefined))
-
-      /**
-       * Dispatch one rewrite with the attachment payload already resolved. Everything up
-       * to the `fetch` runs synchronously, so a text-only click leaves in the same tick as
-       * before; the timer budget follows the payload (images get more time).
-       */
-      const sendPolishRequest = async (started, promptText, attachments) => {
-        const token = started.token
-        const controller = started.controller
-        let timedOut = false
-        let timer
-        const settle = () => {
-          if (timer !== undefined) clearTimeout(timer)
-          timer = undefined
-        }
-        const hasImages = attachments.some((item) => item.type === 'image')
-        timer = setTimeout(() => {
-          timedOut = true
-          try {
-            controller.abort()
-          } catch (_error) {
-            /* already settled */
-          }
-        }, hasImages ? TIMEOUT_MS_WITH_IMAGES : TIMEOUT_MS)
-
-        const body = { sessionId, text: promptText }
-        if (attachments.length > 0) body.attachments = attachments
-
-        // Everything below belongs to the Session that STARTED this request, whichever
-        // Session is open when it settles.
-        const origin = sessionId
-        const originAlive = () => isSessionAlive(sessionsRef.current, origin)
-
-        let response
-        let raw = ''
-        try {
-          response = await fetch(ROUTE, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: controller.signal,
-          })
-          raw = await response.text()
-        } catch (failure) {
-          settle()
-          if (store === null || !store.isCurrent(origin, token)) return
-          if (!originAlive()) {
-            // The Session was closed/deleted while the request ran: drop it silently.
-            store.discard(origin)
-            return
-          }
-          if (failure !== null && failure !== undefined && failure.name === 'AbortError') {
-            if (timedOut) store.fail(origin, token, t('error.timeout'))
-            else store.dismiss(origin)
-            return
-          }
-          store.fail(origin, token, t('error.network'))
-          return
-        }
-        settle()
-        if (store === null || !store.isCurrent(origin, token)) return
-        // A vanished Session never gets a state entry of its own, never writes a draft and
-        // never shows an error: the result is simply discarded.
-        if (!originAlive()) {
-          store.discard(origin)
-          return
-        }
-        let payload = null
-        if (raw !== '') {
-          try {
-            payload = JSON.parse(raw)
-          } catch (_error) {
-            payload = null
-          }
-        }
-        if (payload !== null && typeof payload === 'object' && payload.ok === false) {
-          const message = typeof payload.message === 'string' && payload.message !== '' ? payload.message : t('error.generic')
-          store.fail(origin, token, message)
-          return
-        }
-        const text = payload !== null && typeof payload === 'object' && payload.ok === true && typeof payload.text === 'string' ? payload.text : ''
-        if (!response.ok || text.trim() === '') {
-          store.fail(origin, token, t('error.generic'))
-          return
-        }
-        // Recorded against the origin Session. The write itself happens in that Session's
-        // component effect, so it lands in the right draft even when the user is elsewhere
-        // right now — and it lands exactly once.
-        store.succeed(origin, token, text)
-      }
-
-      /**
-       * Resolve the docked attachments first, then dispatch. With nothing to resolve this
-       * issues the request synchronously; otherwise the store token and session are
-       * re-checked after the await so a stale rewrite can never reach a draft.
-       */
-      const startPolish = async (started, promptText, ids) => {
-        let attachments = NO_ATTACHMENTS
-        if (ids.length > 0) {
-          attachments = await resolvePolishAttachments(ids)
-          // Full re-check after the await: the session may have changed, the request may
-          // have been aborted, or the plugin may have been disposed meanwhile.
-          if (store === null || !store.isCurrent(sessionId, started.token)) return
-        }
-        return sendPolishRequest(started, promptText, attachments)
-      }
+      // One gate for "too little to rewrite": a blank draft and a fragment of a word are
+      // the same problem, so the control stays disabled in both cases.
+      const tooShort = draft.trim().length < MIN_DRAFT_CHARS
+      const disabled = polishing || props.locked === true || (!undoable && (tooShort || sessionId === undefined))
 
       const runPolish = () => {
         if (disabled || polishing || undoable || store === null) return
         const started = store.begin(sessionId, draft)
         if (started === null) return
-        const { token } = started
-        startPolish(started, draft, readAttachmentIds(attachmentIdsValue)).catch((failure) => {
+        const body = { sessionId, text: draft }
+        dispatchOptimize(sessionId, started, readAttachmentIds(attachmentIdsValue), body, t, sessionsRef).catch((failure) => {
           // Defensive: every inner path handles its own failure, so reaching this means a
           // bug. Settle the state instead of leaving a spinner running forever.
           console.error('[prompt-polish] rewrite dispatch failed:', failure)
-          if (store !== null) store.fail(sessionId, token, t('error.generic'))
+          if (store !== null) store.fail(sessionId, started.token, t('error.generic'))
         })
       }
 
@@ -952,6 +1256,171 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         ),
       )
     }
+
+    /**
+     * `conversation.input.dock` — the v2 diagnostic panel, full width above the composer
+     * card (same seat as the queue/todo/goal docks).
+     *
+     * Renders NOTHING in the v1 flow (no plan, or the user closed it), so a Host without
+     * PLAN support degrades to exactly the v1 UI. While a clarification round runs it
+     * collapses to one line with the (disabled) assumptions: the draft area already owns
+     * the busy presentation (the skeleton), and the option buttons must not be clickable
+     * twice. Clicking an option replays the ORIGINAL draft plus every confirmed answer —
+     * the rewritten text is never sent back as input (design v2 §2).
+     */
+    function PolishPlanDock(props) {
+      const t = useTranslate(props)
+      const sessionId = props.sessionId
+      const state = usePolishState(sessionId)
+      const attachmentIdsValue = typeof props.useInput === 'function'
+        ? props.useInput((input) => input.attachmentIds)
+        : undefined
+      const sessionsSnapshot = typeof props.useSessions === 'function' ? props.useSessions((snapshot) => snapshot) : undefined
+      const sessionsRef = React.useRef(sessionsSnapshot)
+      sessionsRef.current = sessionsSnapshot
+
+      const phase = state.phase
+      const plan = state.plan
+      const answers = state.answers ?? NO_ANSWERS
+      const refining = phase === 'pending' && state.mode === 'refine'
+
+      /** Replay the ORIGINAL draft with the confirmed answers, through the shared dispatch. */
+      const startRefine = (started) => dispatchOptimize(
+        sessionId,
+        started,
+        readAttachmentIds(attachmentIdsValue),
+        { sessionId, text: started.requestText, answers: started.answers },
+        t,
+        sessionsRef,
+      )
+
+      const pick = (question, option) => {
+        if (store === null || phase !== 'done' || refining) return
+        const next = [...answers, { q: question, a: option }]
+        const started = store.beginRefine(sessionId, next)
+        if (started === null) return
+        startRefine(started).catch((failure) => {
+          // Defensive: every inner path settles itself, so reaching this means a bug.
+          console.error('[prompt-polish] clarification dispatch failed:', failure)
+          if (store !== null) store.fail(sessionId, started.token, t('error.generic'))
+        })
+      }
+
+      if (refining) {
+        const chips = plan === null ? [] : plan.assumptions
+        return h(
+          React.Fragment,
+          null,
+          h('style', null, PLAN_CSS),
+          h(
+            'div',
+            { className: 'pp-plan pp-plan-busy', role: 'status', 'aria-busy': 'true', 'data-phase': 'refining' },
+            h('span', { className: 'pp-plan-busy-text' }, t('dock.refining')),
+            chips.map((item, index) => h('span', {
+              key: index,
+              className: 'pp-plan-chip',
+              'data-disabled': 'true',
+              title: `${item.slot}=${item.value}`,
+            }, `${item.slot}=${item.value}`)),
+          ),
+        )
+      }
+
+      if (phase !== 'done' || plan === null || state.planHidden === true) return null
+
+      const answered = new Set(answers.map((item) => item.q))
+      // A question the user already answered is never asked twice, even when the second
+      // round's plan block repeats it verbatim (the Host cannot know what we showed).
+      const questions = plan.questions.filter((item) => !answered.has(item.q))
+      const assumptions = plan.assumptions
+      const typeLabel = plan.type !== '' && PLAN_TYPES.has(plan.type) ? t(`dock.type.${plan.type}`) : ''
+
+      // Header key by (type known?, assumptions shown?), then the pending suffix: one
+      // lookup instead of a branch ladder, so a new variant is a single row.
+      const titleKey = typeLabel === ''
+        ? (assumptions.length > 0 ? 'dock.title.plain' : 'dock.title.short.plain')
+        : (assumptions.length > 0 ? 'dock.title' : 'dock.title.short')
+      let title = t(titleKey, { type: typeLabel, count: assumptions.length })
+      if (questions.length > 0) title += t('dock.pending', { count: questions.length })
+
+      const close = () => {
+        if (store !== null) store.hidePlan(sessionId)
+      }
+
+      return h(
+        React.Fragment,
+        null,
+        h('style', null, PLAN_CSS),
+        h(
+          'div',
+          { className: 'pp-plan', 'data-phase': 'done', role: 'group', 'aria-label': title },
+          h(
+            'div',
+            { className: 'pp-plan-head' },
+            h('span', { className: 'pp-plan-title', title }, title),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'pp-plan-close',
+                'aria-label': t('dock.close'),
+                title: t('dock.close'),
+                // Keep the composer's caret where the user left it.
+                onMouseDown: (event) => {
+                  event.preventDefault()
+                },
+                onClick: close,
+              },
+              '×',
+            ),
+          ),
+          assumptions.length === 0 ? null : h(
+            'div',
+            { className: 'pp-plan-row' },
+            h('span', { className: 'pp-plan-tag' }, t('dock.assumptions')),
+            h('span', { className: 'pp-plan-chips' }, assumptions.map((item, index) => h('span', {
+              key: index,
+              className: 'pp-plan-chip',
+              title: `${item.slot}=${item.value}`,
+            }, `${item.slot}=${item.value}`))),
+          ),
+          questions.length === 0 ? null : h(
+            'div',
+            { className: 'pp-plan-row' },
+            h('span', { className: 'pp-plan-tag' }, t('dock.questions')),
+            h('div', { className: 'pp-plan-questions' }, questions.map((item, index) => h(
+              'div',
+              { className: 'pp-plan-question', key: index },
+              h('span', { className: 'pp-plan-q' }, item.q),
+              // options[0] is the Host's recommendation; the badge labels it, never replaces it.
+              item.options.map((option, optionIndex) => h(
+                React.Fragment,
+                { key: optionIndex },
+                optionIndex === 0 ? h('span', { className: 'pp-plan-recommended' }, t('dock.recommended')) : null,
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'pp-plan-option',
+                    title: option,
+                    onMouseDown: (event) => {
+                      event.preventDefault()
+                    },
+                    onClick: () => pick(item.q, option),
+                  },
+                  option,
+                ),
+              )),
+            ))),
+          ),
+          plan.notes === '' ? null : h(
+            'div',
+            { className: 'pp-plan-notes' },
+            t('dock.notes', { notes: plan.notes }),
+          ),
+        ),
+      )
+    }
     //#endregion
 
     return {
@@ -982,6 +1451,23 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'error.network': '网络请求失败，请重试',
                 'error.timeout': '优化超时，请重试',
                 'error.generic': '优化失败，请重试',
+                // v2 diagnostic panel (`conversation.input.dock`).
+                'dock.title': '已按「{type}」补全 {count} 处',
+                'dock.title.plain': '已补全 {count} 处',
+                'dock.title.short': '已按「{type}」改写',
+                'dock.title.short.plain': '已改写',
+                'dock.pending': ' · {count} 个待确认',
+                'dock.assumptions': '补全',
+                'dock.questions': '待确认',
+                'dock.notes': '改动：{notes}',
+                'dock.close': '收起诊断',
+                'dock.refining': '按你的选择重写…',
+                'dock.recommended': '推荐',
+                'dock.type.coding': '编码任务',
+                'dock.type.writing': '写作任务',
+                'dock.type.analysis': '分析任务',
+                'dock.type.image': '图像任务',
+                'dock.type.other': '通用任务',
               },
               en: {
                 'button.polish': 'Polish prompt',
@@ -990,6 +1476,23 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'error.network': 'Network request failed, please retry',
                 'error.timeout': 'Polishing timed out, please retry',
                 'error.generic': 'Could not polish the prompt, please retry',
+                // v2 diagnostic panel (`conversation.input.dock`).
+                'dock.title': 'Filled in {count} gap(s) for a "{type}" prompt',
+                'dock.title.plain': 'Filled in {count} gap(s)',
+                'dock.title.short': 'Rewritten as a "{type}" prompt',
+                'dock.title.short.plain': 'Rewritten',
+                'dock.pending': ' · {count} to confirm',
+                'dock.assumptions': 'Added',
+                'dock.questions': 'Confirm',
+                'dock.notes': 'Changed: {notes}',
+                'dock.close': 'Hide diagnostics',
+                'dock.refining': 'Rewriting with your choices…',
+                'dock.recommended': 'Suggested',
+                'dock.type.coding': 'Coding',
+                'dock.type.writing': 'Writing',
+                'dock.type.analysis': 'Analysis',
+                'dock.type.image': 'Image',
+                'dock.type.other': 'General',
               },
             })
           } catch (error) {
@@ -1011,6 +1514,14 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
           order: 50,
           locale: NS,
         }, PolishSkeleton))
+
+        // Full-width entry above the composer card, beside the shipped queue/todo/goal docks.
+        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({
+          name: 'conversation.input.dock',
+          id: 'prompt-polish-plan',
+          order: 6,
+          locale: NS,
+        }, PolishPlanDock))
       },
     }
   },

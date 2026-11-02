@@ -466,7 +466,7 @@ const editorlessSkeleton = mount(Skeleton, makeProps('s-2'))
 const editorlessButton = mount(Button, makeProps('s-2'))
 const realHeight = composer.editorHeight
 composer.editorHeight = 0 // editor rect unavailable
-setDraftExternal('短草稿')
+setDraftExternal('短的草稿内容')
 findButton(editorlessButton.tree).props.onClick()
 flush()
 geometry = veilGeometry(editorlessSkeleton.tree)

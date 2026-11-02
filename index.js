@@ -36,13 +36,16 @@ export function apply(ctx) {
       const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       const text = typeof payload?.text === 'string' ? payload.text : ''
       if (sessionId === '') return reply({ ok: false, message: 'prompt-polish: missing sessionId' }, 400)
-      // `attachments` is forwarded verbatim: `optimizePrompt` owns every shape check and
-      // degrades an unreadable attachment to metadata instead of failing the request.
+      // `attachments` and `answers` are forwarded verbatim: `optimizePrompt` owns every shape
+      // check and degrades an unreadable attachment to metadata instead of failing the request.
+      // `answers` carries the user's one-tap replies from the v2 diagnostic panel, so the
+      // second pass can rewrite the ORIGINAL draft with those facts pinned.
       try {
         return reply(await optimizePrompt(ctx, {
           sessionId,
           text,
           attachments: payload?.attachments,
+          answers: payload?.answers,
           signal: request.signal,
         }))
       } catch (error) {

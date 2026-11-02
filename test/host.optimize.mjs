@@ -87,7 +87,7 @@ await test('happy path returns {ok:true,text,model} and dispatches once', async 
   const session = makeSession()
   const llm = makeLlm({ chunks: HAPPY })
   const result = await optimizePrompt({ sessions: { get: () => session }, llm }, { sessionId: 'session-7', text: '帮我改一下这个按钮' })
-  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain' })
+  assert.deepEqual(result, { ok: true, text: 'hi', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain', plan: null })
   assert.equal(llm.captured.dispatches, 1, 'exactly one dispatch')
   assert.deepEqual(llm.captured.prepareArgs[0], { provider: 'deepseek', model: 'deepseek-v4.1-flash' })
   const options = llm.captured.options[0]
@@ -99,7 +99,7 @@ await test('happy path returns {ok:true,text,model} and dispatches once', async 
   assert.equal(options.purpose, undefined, 'must not pass purpose')
   assert.equal(typeof options.system, 'string')
   assert.ok(options.system.includes('[[PROMPT_BEGIN]]'), 'the answer form is spelled out')
-  assert.ok(options.system.includes('[[NOTES_BEGIN]]'), 'commentary has a sanctioned place')
+  assert.ok(options.system.includes('[[PLAN_BEGIN]]'), 'the diagnostic has a sanctioned place')
   assert.equal(options.messages.length, 1)
   assert.equal(options.messages[0].role, 'user')
   assert.equal(options.messages[0].id, undefined, 'transient RequestUserInput has no id')
@@ -174,7 +174,7 @@ await test('delta-less adapter recovers text from block-end', async () => {
     { type: 'finish', reason: { kind: 'stop' } },
   ] })
   const result = await optimizePrompt({ sessions: { get: () => makeSession() }, llm }, { sessionId: 's', text: 'draft' })
-  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain' })
+  assert.deepEqual(result, { ok: true, text: 'BLOCK-ONLY', model: 'deepseek-v4.1-flash', route: 'request-header', format: 'plain', plan: null })
 })
 
 // 6. output sanitizing: fence + language tag, preamble line, wrapping quotes
@@ -293,15 +293,12 @@ await test('over-cutting guards: legitimate prompts keep their own labels and ru
 
 /** Build a marker-envelope answer, the shape the system prompt asks for. */
 function envelope(promptText, notes = '') {
-  return [
-    '[[PROMPT_BEGIN]]',
-    promptText,
-    '[[PROMPT_END]]',
-    '',
-    '[[NOTES_BEGIN]]',
-    notes,
-    '[[NOTES_END]]',
-  ].join('\n')
+  const lines = ['[[PROMPT_BEGIN]]', promptText, '[[PROMPT_END]]', '', '[[PLAN_BEGIN]]', 'TYPE: other']
+  // Only the first line of a multi-line note survives: a PLAN record is one line by contract,
+  // and the point of these fixtures is that whatever the model puts there is never shipped.
+  if (notes !== '') lines.push(`NOTE: ${notes.split('\n')[0]}`)
+  lines.push('[[PLAN_END]]')
+  return lines.join('\n')
 }
 
 await test('reads only the marked block and throws away everything around it', async () => {
@@ -337,8 +334,29 @@ await test('tolerates decorated markers and an unterminated block', async () => 
     '请升级 lodash 到 4.17.21。',
   )
   assert.equal(
-    (await replyFor('[[PROMPT_BEGIN]]\n请升级 lodash 到 4.17.21。\n\n[[NOTES_BEGIN]]\n说明：安全修复。')).text,
+    (await replyFor('[[PROMPT_BEGIN]]\n请升级 lodash 到 4.17.21。\n\n[[PLAN_BEGIN]]\nTYPE: other\nNOTE: 说明：安全修复。')).text,
     '请升级 lodash 到 4.17.21。',
+  )
+})
+
+await test('keeps a markdown heading on the first line of the prompt', async () => {
+  // Regression: the marker decoration class used to include \s, which swallowed the newline
+  // after [[PROMPT_BEGIN]] plus the leading '#' of the next line, silently demoting the
+  // prompt's first heading.
+  const raw = [
+    '**[[PROMPT_BEGIN]]**',
+    '# 任务：把 maxTokens 调到 2048',
+    '',
+    '## 约束',
+    '- 只改 optimize.js',
+    '**[[PROMPT_END]]**',
+    '[[PLAN_BEGIN]]',
+    'TYPE: coding',
+    '[[PLAN_END]]',
+  ].join('\n')
+  assert.equal(
+    (await replyFor(raw)).text,
+    '# 任务：把 maxTokens 调到 2048\n\n## 约束\n- 只改 optimize.js',
   )
 })
 
@@ -1029,6 +1047,246 @@ await test('no header, no selection, no default -> ok:false without dispatching'
   assert.equal(llm.captured.dispatches, 0)
 })
 
+// ---------------------------------------------------------------------------
+// v2 diagnostics: the PLAN block
+// ---------------------------------------------------------------------------
+
+/** Build one answer with a given PLAN record list. */
+function withPlan(promptText, planLines) {
+  return [
+    '[[PROMPT_BEGIN]]',
+    promptText,
+    '[[PROMPT_END]]',
+    '',
+    '[[PLAN_BEGIN]]',
+    ...planLines,
+    '[[PLAN_END]]',
+  ].join('\n')
+}
+
+await test('parses TYPE, NOTE, ASSUME and ASK into a plan', async () => {
+  const raw = withPlan('请把 src/a.ts 的 maxTokens 改成 2048。', [
+    'TYPE: coding',
+    'NOTE: 补了验收标准',
+    'ASSUME: 输出格式 => Markdown 表格',
+    'ASSUME: 验收方式 => 跑 node --check',
+    'ASK: 改哪个文件？ => client.js ;; optimize.js',
+  ])
+  const result = await replyFor(raw)
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '请把 src/a.ts 的 maxTokens 改成 2048。')
+  assert.deepEqual(result.plan, {
+    type: 'coding',
+    notes: '补了验收标准',
+    assumptions: [
+      { slot: '输出格式', value: 'Markdown 表格' },
+      { slot: '验收方式', value: '跑 node --check' },
+    ],
+    questions: [{ q: '改哪个文件？', options: ['client.js', 'optimize.js'] }],
+  })
+})
+
+await test('tolerates decorated markers, bullets and full-width colons', async () => {
+  const raw = [
+    '**[[PROMPT_BEGIN]]**',
+    '请补 README。',
+    '**[[PROMPT_END]]**',
+    '```',
+    '[[PLAN_BEGIN]]',
+    '- TYPE：writing',
+    '* NOTE：补了读者与长度',
+    '> ASSUME：语言 => 中文',
+    '`ASK：给谁看？ => 同事 ;; 客户`',
+    '[[PLAN_END]]',
+  ].join('\n')
+  const plan = (await replyFor(raw)).plan
+  assert.equal(plan.type, 'writing')
+  assert.equal(plan.notes, '补了读者与长度')
+  assert.deepEqual(plan.assumptions, [{ slot: '语言', value: '中文' }])
+  assert.deepEqual(plan.questions, [{ q: '给谁看？', options: ['同事', '客户'] }])
+})
+
+await test('an unterminated PLAN block still parses', async () => {
+  const raw = '[[PROMPT_BEGIN]]\n改一下。\n[[PROMPT_END]]\n[[PLAN_BEGIN]]\nTYPE: coding\nASSUME: 语言 => 中文'
+  const plan = (await replyFor(raw)).plan
+  assert.equal(plan.type, 'coding')
+  assert.deepEqual(plan.assumptions, [{ slot: '语言', value: '中文' }])
+})
+
+await test('no PLAN block -> plan:null and the prompt still ships', async () => {
+  const result = await replyFor('[[PROMPT_BEGIN]]\n改一下。\n[[PROMPT_END]]')
+  assert.equal(result.ok, true)
+  assert.equal(result.text, '改一下。')
+  assert.equal(result.plan, null)
+})
+
+await test('a plan with nothing to show is null, even with TYPE and NOTE', async () => {
+  const plan = (await replyFor(withPlan('改一下。', ['TYPE: coding', 'NOTE: 只是收紧措辞']))).plan
+  assert.equal(plan, null, 'the panel must never open on a clean rewrite')
+})
+
+await test('drops malformed records and unknown task types one by one', async () => {
+  const plan = (await replyFor(withPlan('改一下。', [
+    'TYPE: quantum',
+    'ASSUME: 只有槽位没箭头',
+    'ASSUME:  => 没有槽位',
+    'ASK: 只有一个候选？ => 只此一个',
+    '这不是一条记录',
+    'ASSUME: 语言 => 中文',
+  ]))).plan
+  assert.equal(plan.type, '', 'unknown class is dropped, not guessed')
+  assert.deepEqual(plan.assumptions, [{ slot: '语言', value: '中文' }])
+  assert.deepEqual(plan.questions, [], 'a one-option question is not a choice')
+})
+
+await test('recovers pipe-separated options when the model ignores ;;', async () => {
+  const plan = (await replyFor(withPlan('改一下。', ['TYPE: coding', 'ASK: 用哪个？ => a.js | b.js']))).plan
+  assert.deepEqual(plan.questions, [{ q: '用哪个？', options: ['a.js', 'b.js'] }])
+})
+
+await test('enforces the caps: 6 assumptions, 3 questions, 4 options, bounded widths', async () => {
+  const assumeLines = Array.from({ length: 8 }, (_, index) => `ASSUME: 槽位${index} => 取值${index}`)
+  const askLines = Array.from({ length: 5 }, (_, index) => `ASK: 问题${index}？ => a ;; b ;; c ;; d ;; e`)
+  const plan = (await replyFor(withPlan('改一下。', ['TYPE: coding', ...assumeLines, ...askLines]))).plan
+  assert.equal(plan.assumptions.length, 6)
+  assert.equal(plan.questions.length, 3)
+  assert.equal(plan.questions[0].options.length, 4)
+
+  const wide = (await replyFor(withPlan('改一下。', [
+    'TYPE: coding',
+    `ASSUME: ${'槽'.repeat(40)} => ${'值'.repeat(120)}`,
+    `ASK: ${'问'.repeat(80)}？ => ${'选'.repeat(40)} ;; ${'项'.repeat(40)}`,
+  ]))).plan
+  assert.ok(wide.assumptions[0].slot.length <= 10)
+  assert.ok(wide.assumptions[0].value.length <= 30)
+  assert.ok(wide.questions[0].q.length <= 20)
+  assert.ok(wide.questions[0].options.every((option) => option.length <= 12))
+})
+
+await test('splits on the FIRST arrow only, so a value may contain = : |', async () => {
+  const plan = (await replyFor(withPlan('改一下。', [
+    'TYPE: coding',
+    'ASSUME: 判据 => a=b:c|d',
+  ]))).plan
+  assert.deepEqual(plan.assumptions, [{ slot: '判据', value: 'a=b:c|d' }])
+})
+
+await test('de-duplicates identical candidates', async () => {
+  const plan = (await replyFor(withPlan('改一下。', [
+    'TYPE: coding',
+    'ASK: 用哪个？ => a.js ;; a.js ;; b.js',
+  ]))).plan
+  assert.deepEqual(plan.questions, [{ q: '用哪个？', options: ['a.js', 'b.js'] }])
+})
+
+await test('PLAN records leaked into the prompt body are stripped', async () => {
+  const raw = withPlan([
+    '请补 README。',
+    'ASSUME: 语言 => 中文',
+    'ASK: 给谁看？ => 同事 ;; 客户',
+    '验收：能一次跑通。',
+  ].join('\n'), ['TYPE: writing'])
+  assert.equal((await replyFor(raw)).text, '请补 README。\n验收：能一次跑通。')
+})
+
+await test('a PLAN block with no PROMPT block is a failure, not marker-literal text', async () => {
+  // The inverse of "model ignores PLAN": the model ignored the PROMPT block. Shipping the
+  // raw markers would put "[[PLAN_BEGIN]]" in the user's composer.
+  for (const raw of [
+    '[[PLAN_BEGIN]]\n[[PLAN_END]]',
+    '[[PLAN_BEGIN]]\nTYPE: coding\nASSUME: 语言 => 中文\n[[PLAN_END]]',
+  ]) {
+    const result = await replyFor(raw)
+    assert.equal(result.ok, false, 'no prompt was delivered')
+    assert.match(result.message, /没有返回可用的提示词/)
+  }
+})
+
+await test('a legitimate prompt line that merely starts with NOTE/TYPE survives', async () => {
+  // Over-cutting guard for the leak stripper: only well-formed records are removed.
+  assert.equal(
+    (await replyFor('[[PROMPT_BEGIN]]\nNOTE: 这是一个需要保留的说明行。\n请补测试。\n[[PROMPT_END]]')).text,
+    'NOTE: 这是一个需要保留的说明行。\n请补测试。',
+  )
+  assert.equal(
+    (await replyFor('[[PROMPT_BEGIN]]\nTYPE: 请把这段改成正式文风\n[[PROMPT_END]]')).text,
+    'TYPE: 请把这段改成正式文风',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// v2 clarification round: confirmed answers
+// ---------------------------------------------------------------------------
+
+/** Ask for one rewrite with the given payload and return the user input handed to the model. */
+async function inputFor(payload) {
+  const llm = makeLlm({ chunks: HAPPY })
+  const result = await optimizePrompt({ sessions: { get: () => makeSession({ messages: [] }) }, llm }, payload)
+  assert.equal(result.ok, true)
+  return llm.captured.options[0].messages[0].content[0].text
+}
+
+await test('confirmed answers ride along as authoritative facts', async () => {
+  const input = await inputFor({
+    sessionId: 's',
+    text: '把那个按钮改一下',
+    answers: [{ q: '改哪个文件？', a: 'client.js' }],
+  })
+  assert.match(input, /【用户已确认/)
+  assert.ok(input.includes('- 改哪个文件？ → client.js'), 'question and answer are paired')
+  assert.match(input, /最初的草稿/, 'the second pass is told to rewrite from the original draft')
+  assert.match(input, /不要就这些再提问/, 'the answer is not asked twice')
+})
+
+await test('no answers -> no confirmed block at all', async () => {
+  assert.doesNotMatch(await inputFor({ sessionId: 's', text: '把那个按钮改一下' }), /用户已确认/)
+  assert.doesNotMatch(await inputFor({ sessionId: 's', text: '把那个按钮改一下', answers: [] }), /用户已确认/)
+  assert.doesNotMatch(await inputFor({ sessionId: 's', text: '把那个按钮改一下', answers: 'nope' }), /用户已确认/)
+})
+
+await test('answers are validated, de-duplicated and capped to the newest six', async () => {
+  // A repeated question keeps the LATEST answer, and appears once.
+  const deduped = await inputFor({
+    sessionId: 's',
+    text: '改一下',
+    answers: [{ q: '改哪个文件？', a: '旧答案' }, { q: '改哪个文件？', a: 'client.js' }],
+  })
+  assert.ok(deduped.includes('- 改哪个文件？ → client.js'), 'the latest answer for a question wins')
+  assert.ok(!deduped.includes('旧答案'))
+  assert.equal(deduped.split('\n').filter((line) => line.startsWith('- ')).length, 1, 'asked once')
+
+  // Junk entries vanish instead of rendering an empty pair.
+  const junk = await inputFor({
+    sessionId: 's',
+    text: '改一下',
+    answers: [{ q: '  ', a: '空问题被丢弃' }, { q: '没有答案', a: '' }, 'not-an-object', null],
+  })
+  assert.equal(junk.split('\n').filter((line) => line.startsWith('- ')).length, 0)
+  assert.doesNotMatch(junk, /用户已确认/)
+
+  // Over the cap, the newest entries are the ones kept.
+  const capped = await inputFor({
+    sessionId: 's',
+    text: '改一下',
+    answers: Array.from({ length: 8 }, (_, index) => ({ q: `问题${index}`, a: `答案${index}` })),
+  })
+  const pairs = capped.split('\n').filter((line) => line.startsWith('- '))
+  assert.equal(pairs.length, 6, 'only the newest six answers survive')
+  assert.ok(pairs.every((line) => line.includes('问题')), 'the newest entries are the ones kept')
+  assert.ok(pairs[5].includes('问题7'), 'the last answer sent is kept')
+})
+
+await test('the system prompt carries the v2 protocol', async () => {
+  const llm = makeLlm({ chunks: HAPPY })
+  await optimizePrompt({ sessions: { get: () => makeSession({ messages: [] }) }, llm }, { sessionId: 's', text: 'draft' })
+  const system = llm.captured.options[0].system
+  assert.ok(system.includes('[[PLAN_BEGIN]]'))
+  assert.ok(!system.includes('[[NOTES_BEGIN]]'), 'the v1 notes block is gone')
+  for (const marker of ['coding', 'writing', 'analysis', 'image', 'other', 'ASSUME', 'ASK', '占位符', '自检']) {
+    assert.ok(system.includes(marker), `system prompt explains ${marker}`)
+  }
+  assert.ok(system.includes('{{变量}}'), 'placeholders are named explicitly')
+})
 
 console.log('')
 if (failures.length > 0) {

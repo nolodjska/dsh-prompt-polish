@@ -329,7 +329,7 @@ const netError = findAll(button.tree, (n) => n.props.className === 'pp-error')[0
 check(netError !== undefined && textOf(netError) === t('error.network'), 'network failure: localized error')
 
 // session switch: the old request must never write into a draft
-setDraftExternal('旧会话')
+setDraftExternal('旧会话草稿')
 findButton(button.tree).props.onClick()
 flush()
 const stale = pendingRequest
@@ -348,6 +348,12 @@ check(findAll(skeleton2.tree, (n) => n.props.className === 'pp-skeleton').length
 // blank draft disables the control
 setDraftExternal('   ')
 check(findButton(button2.tree).props.disabled === true, 'blank draft: button disabled')
+
+// too-short draft disables it too (v2: a fragment of a word is not worth a call)
+setDraftExternal('改写')
+check(findButton(button2.tree).props.disabled === true, 'short draft: button disabled below MIN_DRAFT_CHARS')
+setDraftExternal('四个字符')
+check(findButton(button2.tree).props.disabled !== true, 'four-char draft: enabled at MIN_DRAFT_CHARS')
 
 // ---------------------------------------------------------------------------
 // no context at all: the first message of a Session must still be polishable.

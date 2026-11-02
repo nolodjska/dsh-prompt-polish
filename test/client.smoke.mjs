@@ -82,14 +82,18 @@ plugin.apply(ctx)
 
 ok(effects.length === 2, 'apply owns 2 ctx.effect resources, got ' + effects.length)
 const registered = registrations.filter((r) => r.options !== undefined)
-ok(registered.length === 2, 'two slot registrations, got ' + registered.length)
+ok(registered.length === 3, 'three slot registrations, got ' + registered.length)
 
 const activity = registered.find((r) => r.options.name === 'conversation.input.activity')
 const overlay = registered.find((r) => r.options.name === 'conversation.input.overlay')
+const dock = registered.find((r) => r.options.name === 'conversation.input.dock')
 ok(activity !== undefined, 'registers conversation.input.activity')
 ok(overlay !== undefined, 'registers conversation.input.overlay')
+ok(dock !== undefined, 'registers conversation.input.dock')
 ok(overlay !== undefined && overlay.options.id === 'prompt-polish-skeleton', 'overlay id prompt-polish-skeleton')
 ok(overlay !== undefined && overlay.options.order === 50, 'overlay order 50')
+ok(dock !== undefined && dock.options.id === 'prompt-polish-plan', 'dock id prompt-polish-plan')
+ok(dock !== undefined && dock.options.order === 6, 'dock order 6')
 ok(activity !== undefined && typeof activity.options.locale === 'string', 'activity declares locale ns')
 ok(activity !== undefined && activity.options.children === undefined, 'activity declares no children (never expands)')
 
@@ -98,7 +102,26 @@ ok(dict !== undefined, 'locale namespace prompt-polish registered')
 const zhKeys = Object.keys(dict?.zh ?? {}).sort()
 const enKeys = Object.keys(dict?.en ?? {}).sort()
 ok(zhKeys.length > 0 && JSON.stringify(zhKeys) === JSON.stringify(enKeys), 'zh and en key sets match')
-for (const key of ['button.polish', 'button.pending', 'button.undo', 'error.network', 'error.timeout', 'error.generic']) {
+for (const key of [
+  'button.polish',
+  'button.pending',
+  'button.undo',
+  'error.network',
+  'error.timeout',
+  'error.generic',
+  'dock.title',
+  'dock.title.plain',
+  'dock.title.short',
+  'dock.title.short.plain',
+  'dock.pending',
+  'dock.assumptions',
+  'dock.questions',
+  'dock.notes',
+  'dock.close',
+  'dock.refining',
+  'dock.recommended',
+  'dock.type.coding',
+]) {
   ok(zhKeys.includes(key), 'dictionary has ' + key)
 }
 
