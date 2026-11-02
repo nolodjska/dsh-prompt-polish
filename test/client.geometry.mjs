@@ -334,7 +334,13 @@ const px = (value) => Number(String(value ?? '').replace('px', ''))
 const veilGeometry = (tree) => {
   const veil = findVeil(tree)
   if (veil === undefined) return null
-  return { top: px(veil.props.style?.top), height: px(veil.props.style?.height), measured: veil.props['data-measured'] }
+  return {
+    top: px(veil.props.style?.top),
+    height: px(veil.props.style?.height),
+    measured: veil.props['data-measured'],
+    armed: veil.props['data-armed'],
+    visibility: veil.props.style?.visibility,
+  }
 }
 //#endregion
 
@@ -355,6 +361,13 @@ let geometry = veilGeometry(skeleton.tree)
 check(geometry !== null && geometry.measured === 'true', 'pending: geometry comes from a real measurement')
 check(geometry.top === 116, 'pending: top follows the editor offset below the attachment rail, got ' + geometry.top)
 check(geometry.height === 330, 'pending: height covers the whole editor, got ' + geometry.height)
+// First-frame placement: the painted frame must be the MEASURED box, and it must not be
+// tweened into place (a tween is what made the veil look like it flew in from elsewhere).
+check(geometry.visibility === undefined, 'pending: the measured box is painted, not hidden')
+check(geometry.armed === 'false', 'pending: transition not armed yet, so the first placement cannot animate')
+await tick()
+flush()
+check(veilGeometry(skeleton.tree).armed === 'true', 'pending: transition armed after the first painted frame')
 let bars = barsOf(skeleton.tree)
 check(bars.length === Math.round(330 / 24), 'pending: bar count derives from the measured height, got ' + bars.length)
 check(bars.length >= 13 && bars.length <= 14, 'pending: 330px → 13-14 bars on the 24px pitch')
@@ -368,7 +381,7 @@ check(styleNode !== undefined, 'pending: styles ship with the component')
 const css = String(textOf(styleNode))
 check(css.includes('pointer-events:none'), 'pending: veil is click-through')
 check(css.includes('--dsw-specific-input-major') && css.includes('color-mix'), 'pending: opaque surface with a color-mix fallback')
-check(css.includes('transition:top .18s ease,height .18s ease'), 'pending: top/height transition')
+check(css.includes('.pp-skeleton[data-armed="true"]{transition:top .18s ease,height .18s ease}'), 'pending: the resize transition is gated on data-armed')
 check(css.includes('prefers-reduced-motion') && css.includes('.pp-skeleton{transition:none}'), 'pending: static under reduced motion')
 check(css.includes('height:10px') && css.includes('gap:14px'), 'pending: 10px bar on the 24px pitch')
 
@@ -472,6 +485,7 @@ flush()
 geometry = veilGeometry(editorlessSkeleton.tree)
 check(geometry !== null && geometry.measured === 'false', 'fallback: unmeasurable editor falls back to the estimate')
 check(geometry.height === 48 && geometry.top === 6, 'fallback: 2-line estimate (48px) at the legacy offset, got ' + JSON.stringify(geometry))
+check(geometry.visibility === undefined, 'fallback: a hookless host still shows the veil instead of hiding it forever')
 check(barsOf(editorlessSkeleton.tree).length === 2, 'fallback: 48px → 2 bars')
 
 // and a tall draft keeps a taller estimate

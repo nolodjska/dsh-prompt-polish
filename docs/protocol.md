@@ -186,6 +186,12 @@ ASK: 改哪个文件？ => client.js ;; optimize.js
 - 发起会话消失（关闭/删除）：完成时用会话目录快照校验，不在目录里就静默丢弃。
 - 骨架屏用 `[data-composer-overlay]` → `[data-composer-card]` → `[data-composer-input]`
   量编辑器矩形（裁到可见框），`ResizeObserver` 跟随，bar 数按 24px 行距由高度推导。
+- **骨架屏首帧不画猜测值**：`top`/`height` 只有量出来之后才用，测量完成前元素是
+  `visibility:hidden`（挂载着、有真实 rect，但不会被看见）。`top/height` 过渡挂在
+  `data-armed="true"` 上，该属性要等第一帧量好的画面画完才置上（`requestAnimationFrame`，
+  无 rAF 时退化为 `setTimeout 0`），因此**初次落位是瞬时的**，只有后续真实 resize
+  （用户仍在打字）才会有动画。估高只在宿主不暴露上述钩子时使用——那时不会再有"修正"，
+  估高即终值。
 - 面板只在 `done && plan && !planHidden` 渲染；`pending && mode==='refine'` 时收成一行。
   `×` 只收起面板，不影响 ↺。
 

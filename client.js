@@ -44,6 +44,11 @@ window.__ModuleLoader__.load({
     const SKELETON_LAST_WIDTHS = [58, 46, 64, 52]
     /** Fallback veil offset from the anchor when the editor cannot be measured (today's geometry). */
     const SKELETON_FALLBACK_TOP = 6
+    /**
+     * Stable identity for "this host exposes no composer hooks". The reveal gate compares by
+     * identity, so a re-measure that keeps failing must not mint a new object and re-render.
+     */
+    const FALLBACK_LAYOUT = Object.freeze({ fallback: true })
     /** Host hooks: the composer card, the overlay anchor we render into, and the Lexical root. */
     const COMPOSER_CARD_SELECTOR = '[data-composer-card]'
     const COMPOSER_OVERLAY_SELECTOR = '[data-composer-overlay]'
@@ -745,15 +750,16 @@ window.__ModuleLoader__.load({
 `
 
     const SKELETON_CSS = `
-.pp-skeleton{position:absolute;z-index:1;left:14px;right:10px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;gap:14px;padding:4px 0;overflow:hidden;border-radius:var(--dsw-radius-sm,6px);pointer-events:none;cursor:default;user-select:none;transition:top .18s ease,height .18s ease;
+.pp-skeleton{position:absolute;z-index:1;left:14px;right:10px;box-sizing:border-box;display:flex;flex-direction:column;justify-content:flex-start;gap:14px;padding:4px 0;overflow:hidden;border-radius:var(--dsw-radius-sm,6px);pointer-events:none;cursor:default;user-select:none;
 background:#1f1f22;
 background:var(--dsw-specific-input-major,#1f1f22);
 background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--dsw-alias-bg-layer-1,#1f1f22))}
+.pp-skeleton[data-armed="true"]{transition:top .18s ease,height .18s ease}
 .pp-bar{flex:none;height:10px;border-radius:999px;background:linear-gradient(90deg,var(--dsw-alias-interactive-bg-hover) 0%,var(--dsw-alias-interactive-bg-hover-solid) 50%,var(--dsw-alias-interactive-bg-hover) 100%);background-size:220% 100%;animation:pp-shimmer 1.3s ease-in-out infinite}
 .pp-bar:nth-child(3n+2){animation-delay:.12s}
 .pp-bar:nth-child(3n+3){animation-delay:.24s}
 @keyframes pp-shimmer{from{background-position:120% 0}to{background-position:-120% 0}}
-@media (prefers-reduced-motion: reduce){.pp-skeleton{transition:none}.pp-bar{animation:none;background:var(--dsw-alias-interactive-bg-hover)}}
+@media (prefers-reduced-motion: reduce){.pp-skeleton{transition:none}.pp-skeleton[data-armed="true"]{transition:none}.pp-bar{animation:none;background:var(--dsw-alias-interactive-bg-hover)}}
 `
 
     /**
@@ -1107,6 +1113,29 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
     }
 
     /**
+     * Run `fn` once the browser has had a chance to paint the current frame, and return its
+     * canceller. `requestAnimationFrame` is the exact primitive (it fires before the NEXT
+     * paint, i.e. after the current one); a 0ms timer is the fallback for shells without it.
+     * @param {() => void} fn callback.
+     * @returns {() => void} canceller.
+     */
+    function scheduleAfterPaint(fn) {
+      const raf = globalThis.requestAnimationFrame
+      if (typeof raf === 'function') {
+        const id = raf(fn)
+        return () => {
+          try {
+            if (typeof globalThis.cancelAnimationFrame === 'function') globalThis.cancelAnimationFrame(id)
+          } catch (_error) {
+            /* already fired */
+          }
+        }
+      }
+      const id = setTimeout(fn, 0)
+      return () => clearTimeout(id)
+    }
+
+    /**
      * Estimated veil height from the draft when the editor cannot be measured: one line
      * per visual line (54 characters wide), on the same 24px pitch, clamped.
      * @param {string} draft the composer draft.
@@ -1166,8 +1195,21 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
      * The veil covers the composer's whole text area at whatever height it currently
      * has: it measures the Lexical root on every paint of interest (mount, editor
      * resize, card resize, window resize) and sizes itself to that rect, so a tall
-     * multi-line draft is fully covered instead of only its first lines. When the
-     * measurement is unavailable it falls back to the draft-based estimate.
+     * multi-line draft is fully covered instead of only its first lines.
+     *
+     * NEVER PAINT AN UNMEASURED BOX. A guessed top/height is wrong by construction (the
+     * estimate counts draft lines, the real box is clipped by the composer's scrollport,
+     * and the top depends on the attachment rail above the editor). Painting the guess and
+     * then correcting it is exactly what made the veil appear somewhere else and slide into
+     * the composer, because the top/height transition — which exists to smooth genuine
+     * resizes while the user keeps typing — animated the correction too. So:
+     *
+     *   - until the first measurement attempt has completed, the veil is `visibility:hidden`
+     *     (mounted, so the ref and the rect are real, but never seen at a guessed position);
+     *   - the transition is armed only for the frame AFTER the first measured paint, so the
+     *     initial placement is instantaneous and later resizes still animate;
+     *   - the estimate is used only when the host exposes no composer hooks at all, where it
+     *     is the only thing available and it is stable (no correction will ever follow).
      *
      * Decorative: pointer-events none, aria-hidden, and a static (un-animated)
      * presentation under prefers-reduced-motion.
@@ -1179,31 +1221,47 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
       const state = usePolishState(sessionId)
       const pending = state.phase === 'pending'
       const veilRef = React.useRef(null)
-      const [geometry, setGeometry] = React.useState(null)
+      /**
+       * `null` — not measured yet: stay hidden, never paint a guess.
+       * `{ top, height }` — the measured box.
+       * `{ fallback: true }` — this host exposes no composer hooks: show the estimate.
+       */
+      const [layout, setLayout] = React.useState(null)
+      /** Transitions stay off until the measured frame has been painted. */
+      const [armed, setArmed] = React.useState(false)
 
       useLayoutEffectSafe(() => {
         if (!pending) {
-          setGeometry(null)
+          setLayout(null)
+          setArmed(false)
           return undefined
         }
         const node = veilRef.current
-        if (node === null || node === undefined) return undefined
+        if (node === null || node === undefined) {
+          // Nothing to measure against: show the estimate rather than an invisible veil.
+          setLayout(FALLBACK_LAYOUT)
+          return undefined
+        }
 
         let live = true
         const measure = () => {
           if (!live) return
           const next = measureComposerEditor(veilRef.current)
-          setGeometry((previous) => (
-            previous !== null && next !== null
-              && previous.top === next.top && previous.height === next.height
-              ? previous
-              : next
-          ))
+          setLayout((previous) => {
+            if (next === null) return previous === FALLBACK_LAYOUT ? previous : FALLBACK_LAYOUT
+            if (previous !== null && previous.fallback !== true
+              && previous.top === next.top && previous.height === next.height) return previous
+            return next
+          })
         }
 
         measure()
+        // Arm the transition one frame later: the first placement must not tween.
+        const cancelArm = scheduleAfterPaint(() => {
+          if (live) setArmed(true)
+        })
 
-        const disposers = []
+        const disposers = [cancelArm]
         const observer = createResizeObserver(measure)
         if (observer !== null) {
           const { editor, card } = composerMeasureTargets(veilRef.current)
@@ -1235,8 +1293,9 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
 
       if (!pending) return null
 
-      const height = geometry !== null ? geometry.height : estimateSkeletonHeight(draft)
-      const top = geometry !== null ? geometry.top : SKELETON_FALLBACK_TOP
+      const measured = layout !== null && layout.fallback !== true
+      const height = measured ? layout.height : estimateSkeletonHeight(draft)
+      const top = measured ? layout.top : SKELETON_FALLBACK_TOP
       const widths = skeletonBarWidths(skeletonBarCount(height))
 
       return h(
@@ -1249,8 +1308,15 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
             className: 'pp-skeleton',
             ref: veilRef,
             'aria-hidden': 'true',
-            'data-measured': geometry !== null ? 'true' : 'false',
-            style: { top: `${top}px`, height: `${height}px` },
+            'data-measured': measured ? 'true' : 'false',
+            'data-armed': armed ? 'true' : 'false',
+            // Hidden until a measurement attempt has completed: the first painted frame is
+            // the final box, never a guess that would then animate into place.
+            style: {
+              top: `${top}px`,
+              height: `${height}px`,
+              ...(layout === null ? { visibility: 'hidden' } : {}),
+            },
           },
           widths.map((width, index) => h('span', { key: index, className: 'pp-bar', style: { width } })),
         ),
