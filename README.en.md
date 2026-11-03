@@ -19,7 +19,7 @@ flowchart TD
     USE --> WRITE
     WRITE --> PANEL["Diagnostic panel above the composer card<br/>3 filled in · 2 to confirm"]
     ASK --> PANEL
-    PANEL --> PICK{"Picked an option"}
+    PANEL --> PICK{"Selected and confirmed?"}
     PICK -->|"Yes"| AGAIN["Second call with your answers<br/>rewritten from the original draft again"]
     AGAIN --> WRITE
     PICK -->|"No"| SEND["Send it<br/>or press ↺ to get your original text back"]
@@ -86,7 +86,7 @@ plugin_manager remove_bundle   →  target: @local/prompt-polish
 | Idle | ✦ optimize (disabled below 4 characters) | Normal |
 | Running | Spinner, disabled | A softly shimmering skeleton tracking the composer height; **you can keep typing** |
 | Done | ↺ undo | Holds the rewritten prompt; a diagnostic panel appears above when there is something to report |
-| Clarifying | Spinner, disabled | Skeleton keeps playing; the panel collapses to one line, "Rewriting with your answers…" |
+| Clarifying | Spinner, disabled | Skeleton keeps playing; the panel collapses to one line, "Rewriting with your choices…" |
 | Failed | One short message beside the button, gone after 6 seconds | Your original draft, untouched |
 
 A few things worth knowing up front:
@@ -103,14 +103,15 @@ The panel appears only when something was **actually filled in** or there is **a
 
 | Row | Content | What you do |
 | --- | --- | --- |
-| Title | `3 filled in · 2 to confirm` for a coding task | `×` on the right collapses the panel; ↺ undo stays available |
-| Filled in | One chip per slot that was filled, e.g. `output format=Markdown table` | Already written into the prompt, just read it |
-| To confirm | At most 3 questions, 2–4 candidates each, the first marked "suggested" | Click any candidate → **rewritten from the original draft** with your answer |
-| Changed | One line saying what it changed | Nothing |
+| Title | Type badge + `3 filled in · 2 to confirm` | `×` on the right collapses the panel; ↺ undo stays available |
+| Filled in | One chip per slot that was filled, e.g. `output format` `Markdown table` | Already written into the prompt, just read it |
+| To confirm | At most 3 questions, 2–4 candidates each, the first marked with a ★ | Clicking a candidate only **selects** it; press "Confirm and rewrite" and the draft is **rewritten from the original draft** with your answers |
+| Changed | One line saying what it changed, with `picked 1/2` on the right | Nothing |
 
 - **Anything you answered is never asked again.**
+- **A click never executes anything.** Candidates are selected (click again to clear) and only "Confirm and rewrite" sends them — browsing the options cannot fire a round by accident.
+- **All questions travel in one request**, and ↺ always returns to **the text you first typed**.
 - **Prefer to write the answer yourself?** Do not click a candidate: edit the draft and press ✦ again.
-- **Clicking a candidate costs exactly one more request**, and ↺ always returns to **the text you first typed**.
 - Collapsing the panel, editing the rewritten text, or sending it all invalidate it — the same rule that governs ↺.
 
 ## Configuration

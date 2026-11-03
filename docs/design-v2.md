@@ -149,6 +149,22 @@ ASK: 改哪个文件？ => client.js ;; optimize.js
 - 文案：全部进 locale 词典（新增 `dock.*` 键），不硬编码中文到逻辑里。所有上限（展示条数、字符截断）在 client 侧也要有，Host 裁剪是第一道，client 渲染是第二道。
 - 按钮禁用条件收敛为一条：`draft.trim().length < MIN_DRAFT_CHARS(4)`（比 v1 的"空草稿"多两字符，避免把 `hi`/`ok` 也送进模型）。
 
+### 6.1 面板视觉规范（v2.1）
+
+一屏五件事，从上到下就是阅读顺序；**形状承担层级**，不再所有东西都是胶囊：
+
+| 行 | 结构 | 规约 |
+| --- | --- | --- |
+| 头 | `.pp-plan-type`（类型徽标，描边）+ `.pp-plan-summary`（`补全 N 处 · 待确认 N`）+ `.pp-plan-close`（×） | 类型不再写进句子；标题只留两个数字 |
+| 补全 | `.pp-plan-tag` + `.pp-plan-chip`（`-k` 槽位灰 / `-v` 取值亮，无 `=`） | 长取值 60 字截断加 `…`，`title` 给全文 |
+| 待确认 | `.pp-plan-tag` + `.pp-plan-asks` > `.pp-plan-ask`（`.pp-plan-q` + `.pp-plan-seg` > `.pp-plan-opt`） | 一问一行；选项共用边框成一组，`data-rec="true"` 用 ★ 标推荐（不再是独立徽标） |
+| 底 | `.pp-plan-foot`：`.pp-plan-notes` 左 + `.pp-plan-progress`（`已选 1/2`）+ `.pp-plan-confirm` 右 | 面板里**唯一**的实心按钮；未选时 `disabled` 变描边 |
+| 忙 | `.pp-plan-busy`：`.pp-plan-spinner` + 一行文案 + 灰掉的 chips | 高度压到最小，位置不跳 |
+
+状态只用两个属性和两个类表达：`data-selected="true"`（实心 + ✓）、`data-rec="true"`（★）、`data-disabled="true"`（忙时灰）、`data-phase="done|refining"`。着色变量一律带字面量兜底（`var(--dsw-alias-state-business-primary,#a8c7fa)`），主题变量改名时面板会退化成可见色，而不是暗色文字压暗色底。
+
+改样式后想直接看效果，不用起 Harness：`test/client.plan.mjs` 已经能把真实组件树渲染出来，把 `renderTree()` 打到 HTML 再从 `PLAN_CSS` 里取样式即可（本次改版就是这么验的）。
+
 ## 7. 测试（沿用离线 harness，不联网、不起 Harness）
 
 | 文件 | 新增覆盖 |

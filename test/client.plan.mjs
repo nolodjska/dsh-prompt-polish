@@ -153,7 +153,7 @@ const textOf = (node) => {
   return ''
 }
 const planRoots = (tree) => byClass(tree, 'pp-plan')
-const optionsOf = (tree) => byClass(tree, 'pp-plan-option')
+const optionsOf = (tree) => byClass(tree, 'pp-plan-opt')
 const chipsOf = (tree) => byClass(tree, 'pp-plan-chip')
 const questionsOf = (tree) => byClass(tree, 'pp-plan-q')
 const confirmOf = (tree) => byClass(tree, 'pp-plan-confirm')[0]
@@ -173,7 +173,11 @@ const confirm = (tree) => {
   flush()
 }
 /** The panel's one-line header. */
-const titleOf = (tree) => textOf(byClass(tree, 'pp-plan-title')[0])
+const summaryOf = (tree) => textOf(byClass(tree, 'pp-plan-summary')[0])
+/** The optional type badge in the header (编码任务). */
+const typeOf = (tree) => textOf(byClass(tree, 'pp-plan-type')[0])
+/** One assumption chip, split into its two tones. */
+const chipParts = (node) => [textOf(byClass(node, 'pp-plan-chip-k')[0]), textOf(byClass(node, 'pp-plan-chip-v')[0])]
 /** Unicode length, matching the client's clipping rule. */
 const len = (text) => Array.from(text).length
 //#endregion
@@ -326,15 +330,16 @@ flush()
 
 check(drafts.get(SESSION) === '改写后的提示词', 'plan: rewrite still applied to the draft')
 check(planRoots(dock.tree).length === 1, 'plan: dock renders the panel')
-check(titleOf(dock.tree) === '已按「编码任务」补全 2 处 · 2 个待确认', 'plan: header counts + type label, got ' + titleOf(dock.tree))
+check(typeOf(dock.tree) === '编码任务', 'plan: type is its own badge, got ' + typeOf(dock.tree))
+check(summaryOf(dock.tree) === '补全 2 处 · 待确认 2', 'plan: summary counts, got ' + summaryOf(dock.tree))
 check(byClass(dock.tree, 'pp-plan-tag').map(textOf).join('|') === '补全|待确认', 'plan: section tags are localized')
 check(chipsOf(dock.tree).length === 2, 'plan: one chip per assumption')
-check(textOf(chipsOf(dock.tree)[0]) === '输出格式=Markdown 表格', 'plan: chip is slot=value')
+check(chipParts(chipsOf(dock.tree)[0]).join('|') === '输出格式|Markdown 表格', 'plan: chip is slot + value, two tones')
 check(questionsOf(dock.tree).length === 2, 'plan: one line per question')
 check(textOf(questionsOf(dock.tree)[0]) === '改哪个文件？', 'plan: question text rendered')
 check(optionsOf(dock.tree).length === 5, 'plan: 3 + 2 option buttons rendered')
-check(byClass(dock.tree, 'pp-plan-recommended').length === 2, 'plan: every question marks its recommended option')
-check(textOf(byClass(dock.tree, 'pp-plan-recommended')[0]) === '推荐', 'plan: recommended badge is localized')
+check(optionsOf(dock.tree).filter((node) => node.props['data-rec'] === 'true').length === 2, 'plan: every question marks its recommended option')
+check(String(optionsOf(dock.tree)[0].props.title).includes('推荐'), 'plan: the star explains itself in the title')
 check(textOf(byClass(dock.tree, 'pp-plan-notes')[0]) === '改动：去掉了重复描述，补了验收标准', 'plan: notes rendered as one line')
 //#endregion
 
@@ -379,7 +384,8 @@ check(JSON.stringify(answersOf(pendingRequest)) === JSON.stringify([{ q: '改哪
 check(bodyOf(pendingRequest).sessionId === SESSION, 'refine: carries the Session id')
 check(bodyOf(pendingRequest).attachments === undefined, 'refine: no attachment key when the dock is empty')
 check(byClass(dock.tree, 'pp-plan pp-plan-busy').length === 1, 'refine pending: panel collapses to one busy line')
-check(textOf(byClass(dock.tree, 'pp-plan-busy-text')[0]) === '按你的选择重写…', 'refine pending: localized busy line')
+check(textOf(byClass(dock.tree, 'pp-plan-busy-text')[0]) === '正在按你的选择重写…', 'refine pending: localized busy line')
+check(byClass(dock.tree, 'pp-plan-spinner').length === 1, 'refine pending: a spinner marks the wait')
 check(optionsOf(dock.tree).length === 0, 'refine pending: option buttons are gone')
 const busyChips = chipsOf(dock.tree)
 check(busyChips.length === 2 && busyChips.every((node) => node.props['data-disabled'] === 'true'), 'refine pending: assumption chips stay but are disabled')
@@ -409,8 +415,8 @@ check(drafts.get(SESSION) === '二次改写结果', 'refine: new text applied by
 check(planRoots(dock.tree).length === 1, 'refine: panel stays after success')
 check(questionsOf(dock.tree).length === 1, 'refine: answered question is not rendered again')
 check(textOf(questionsOf(dock.tree)[0]) === '要不要保留旧接口？', 'refine: the remaining question is kept')
-check(titleOf(dock.tree) === '已按「编码任务」补全 1 处 · 1 个待确认', 'refine: header recounts after refresh, got ' + titleOf(dock.tree))
-check(chipsOf(dock.tree).length === 1 && textOf(chipsOf(dock.tree)[0]) === '语言=中文', 'refine: assumptions refreshed')
+check(summaryOf(dock.tree) === '补全 1 处 · 待确认 1', 'refine: summary recounts after refresh, got ' + summaryOf(dock.tree))
+check(chipsOf(dock.tree).length === 1 && chipParts(chipsOf(dock.tree)[0]).join('|') === '语言|中文', 'refine: assumptions refreshed')
 //#endregion
 
 //#region 5. answers accumulate; a new question appears
@@ -575,10 +581,11 @@ await tick()
 flush()
 
 check(drafts.get(truncSession) === '写好的产品介绍', 'type: rewrite applied')
-check(titleOf(truncDock.tree) === '已按「写作任务」补全 6 处 · 1 个待确认', 'type: writing maps to 写作任务 and counts are display-capped, got ' + titleOf(truncDock.tree))
+check(typeOf(truncDock.tree) === '写作任务', 'type: writing maps to 写作任务, got ' + typeOf(truncDock.tree))
+check(summaryOf(truncDock.tree) === '补全 6 处 · 待确认 1', 'type: counts are display-capped, got ' + summaryOf(truncDock.tree))
 check(chipsOf(truncDock.tree).length === 6, 'truncate: assumptions capped at 6')
-const firstChip = textOf(chipsOf(truncDock.tree)[0])
-check(firstChip.endsWith('…') && len(firstChip.slice('槽位0='.length)) === 60, 'truncate: assumption value clipped to 60 chars')
+const firstChip = chipParts(chipsOf(truncDock.tree)[0])[1]
+check(firstChip.endsWith('…') && len(firstChip) === 60, 'truncate: assumption value clipped to 60 chars')
 check(len(textOf(questionsOf(truncDock.tree)[0])) === 40 && textOf(questionsOf(truncDock.tree)[0]).endsWith('…'), 'truncate: question clipped to 40 chars')
 check(optionsOf(truncDock.tree).length === 4, 'truncate: options capped at 4')
 check(textOf(optionsOf(truncDock.tree)[3]).endsWith('…') && len(textOf(optionsOf(truncDock.tree)[3])) === 20, 'truncate: option clipped to 20 chars')
@@ -604,8 +611,9 @@ pendingRequest.resolve(jsonResponse({
 }))
 await tick()
 flush()
-check(titleOf(unknownDock.tree) === '已补全 1 处', 'unknown type: label omitted, got ' + titleOf(unknownDock.tree))
-check(!titleOf(unknownDock.tree).includes('「'), 'unknown type: no quote placeholder leaks')
+check(typeOf(unknownDock.tree) === '', 'unknown type: no badge, got ' + typeOf(unknownDock.tree))
+check(summaryOf(unknownDock.tree) === '补全 1 处', 'unknown type: summary keeps the count, got ' + summaryOf(unknownDock.tree))
+check(!summaryOf(unknownDock.tree).includes('「'), 'unknown type: no quote placeholder leaks')
 unmount(unknownButton)
 unmount(unknownDock)
 

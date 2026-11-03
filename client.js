@@ -739,13 +739,13 @@ window.__ModuleLoader__.load({
 .pp-root{display:inline-flex;align-items:center;gap:8px;min-width:0}
 .pp-wrap{display:inline-flex;flex:none}
 .pp-btn{box-sizing:border-box;width:28px;height:28px;flex:none;display:grid;place-items:center;padding:0;margin:0;border:none;border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;transition:background-color .12s ease,color .12s ease,opacity .12s ease}
-.pp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.pp-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary)}
 .pp-btn:active:not(:disabled){background:var(--dsw-alias-interactive-bg-hover-solid)}
 .pp-btn:focus{outline:none}
-.pp-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.pp-btn:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#a8c7fa);outline-offset:1px}
 .pp-btn:disabled{opacity:.45;cursor:default}
-.pp-btn[data-phase="done"]{color:var(--dsw-alias-state-business-primary)}
-.pp-btn[data-phase="done"]:hover:not(:disabled){color:var(--dsw-alias-state-business-primary)}
+.pp-btn[data-phase="done"]{color:var(--dsw-alias-state-business-primary,#a8c7fa)}
+.pp-btn[data-phase="done"]:hover:not(:disabled){color:var(--dsw-alias-state-business-primary,#a8c7fa)}
 .pp-icon{display:block;pointer-events:none}
 .pp-spin{animation:pp-spin 1s linear infinite;transform-origin:50% 50%}
 @keyframes pp-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
@@ -759,11 +759,11 @@ background:#1f1f22;
 background:var(--dsw-specific-input-major,#1f1f22);
 background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--dsw-alias-bg-layer-1,#1f1f22))}
 .pp-skeleton[data-armed="true"]{transition:top .18s ease,height .18s ease}
-.pp-bar{flex:none;height:10px;border-radius:999px;background:linear-gradient(90deg,var(--dsw-alias-interactive-bg-hover) 0%,var(--dsw-alias-interactive-bg-hover-solid) 50%,var(--dsw-alias-interactive-bg-hover) 100%);background-size:220% 100%;animation:pp-shimmer 1.3s ease-in-out infinite}
+.pp-bar{flex:none;height:10px;border-radius:999px;background:linear-gradient(90deg,var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08)) 0%,var(--dsw-alias-interactive-bg-hover-solid) 50%,var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08)) 100%);background-size:220% 100%;animation:pp-shimmer 1.3s ease-in-out infinite}
 .pp-bar:nth-child(3n+2){animation-delay:.12s}
 .pp-bar:nth-child(3n+3){animation-delay:.24s}
 @keyframes pp-shimmer{from{background-position:120% 0}to{background-position:-120% 0}}
-@media (prefers-reduced-motion: reduce){.pp-skeleton{transition:none}.pp-skeleton[data-armed="true"]{transition:none}.pp-bar{animation:none;background:var(--dsw-alias-interactive-bg-hover)}}
+@media (prefers-reduced-motion: reduce){.pp-skeleton{transition:none}.pp-skeleton[data-armed="true"]{transition:none}.pp-bar{animation:none;background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08))}}
 `
 
     /**
@@ -773,35 +773,49 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
      */
     const PLAN_CSS = `
 .pp-plan{box-sizing:border-box;width:calc(100% - var(--dsh-composer-side-clearance,0px) - var(--dsh-composer-side-clearance,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px));max-width:calc(var(--dsh-composer-card-max-width,760px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px) - var(--dsh-composer-dock-inset,0px));flex:none;display:flex;flex-direction:column;gap:6px;margin:0 auto;padding:8px 12px 10px;border:.5px solid var(--dsw-alias-border-l1,rgba(255,255,255,.08));border-radius:var(--dsw-radius-lg,12px);background:var(--dsw-specific-menu,#1f1f22);backdrop-filter:var(--dsw-menu-backdrop-filter,none);box-shadow:var(--dsw-elevation-panel,none);color:var(--dsw-alias-label-secondary,#a9a9b0);font-size:12px;line-height:20px;overflow:hidden}
-.pp-plan-head{display:flex;align-items:flex-start;gap:8px;min-width:0}
-.pp-plan-title{flex:auto;min-width:0;color:var(--dsw-alias-label-primary,#f2f2f5);font-size:13px;font-weight:500;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pp-plan-head{display:flex;align-items:center;gap:8px;min-width:0}
+.pp-plan-type{box-sizing:border-box;flex:none;padding:0 5px;border:.5px solid var(--dsw-alias-state-business-primary,#a8c7fa);border-radius:5px;color:var(--dsw-alias-state-business-primary,#a8c7fa);font-size:11px;line-height:16px;white-space:nowrap}
+.pp-plan-summary{flex:auto;min-width:0;color:var(--dsw-alias-label-secondary,#a9a9b0);font-size:12px;line-height:20px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pp-plan-close{box-sizing:border-box;flex:none;width:20px;height:20px;display:grid;place-items:center;padding:0;margin:0;border:none;border-radius:6px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8a91);font:inherit;font-size:14px;line-height:1;cursor:pointer}
-.pp-plan-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary,#f2f2f5)}
+.pp-plan-close:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#f2f2f5)}
 .pp-plan-close:focus{outline:none}
-.pp-plan-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
+.pp-plan-close:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#a8c7fa);outline-offset:1px}
 .pp-plan-row{display:flex;align-items:flex-start;gap:8px;min-width:0}
-.pp-plan-tag{flex:none;color:var(--dsw-alias-label-tertiary,#8a8a91);font-size:12px;line-height:20px}
+.pp-plan-tag{flex:none;min-width:36px;color:var(--dsw-alias-label-tertiary,#8a8a91);font-size:11px;line-height:20px;white-space:nowrap}
 .pp-plan-chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
-.pp-plan-chip{max-width:100%;padding:1px 8px;border-radius:999px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06));color:var(--dsw-alias-label-secondary,#a9a9b0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp-plan-chip{box-sizing:border-box;display:inline-flex;align-items:baseline;gap:5px;max-width:100%;padding:0 6px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:6px;background:var(--dsw-alias-bg-layer-2,rgba(255,255,255,.06));font-size:12px;line-height:18px}
+.pp-plan-chip-k{flex:none;color:var(--dsw-alias-label-tertiary,#8a8a91)}
+.pp-plan-chip-v{color:var(--dsw-alias-label-primary,#f2f2f5);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pp-plan-chip[data-disabled="true"]{opacity:.55}
-.pp-plan-questions{display:flex;flex-direction:column;gap:4px;min-width:0}
-.pp-plan-question{display:flex;flex-wrap:wrap;align-items:center;gap:6px;min-width:0}
-.pp-plan-q{color:var(--dsw-alias-label-primary,#f2f2f5);font-size:12px;line-height:20px}
-.pp-plan-recommended{flex:none;padding:0 6px;border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font-size:11px;line-height:16px;opacity:.9}
-.pp-plan-option{box-sizing:border-box;max-width:100%;padding:1px 8px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#a9a9b0);font:inherit;font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-.pp-plan-option:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary,#f2f2f5);border-color:var(--dsw-alias-state-business-primary)}
-.pp-plan-option:focus{outline:none}
-.pp-plan-option:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
-.pp-plan-option:disabled{opacity:.5;cursor:default}
-.pp-plan-option[data-selected="true"]{background:var(--dsw-alias-state-business-primary);border-color:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d)}
-.pp-plan-option[data-selected="true"]:hover{background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d)}
-.pp-plan-confirm-row{display:flex;justify-content:flex-end;padding-top:2px}
-.pp-plan-confirm{box-sizing:border-box;padding:1px 10px;border:.5px solid var(--dsw-alias-state-business-primary);border-radius:999px;background:var(--dsw-alias-state-business-primary);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font:inherit;font-size:12px;line-height:18px;cursor:pointer}
-.pp-plan-confirm:disabled{opacity:.45;cursor:default;background:transparent;border-color:var(--dsw-alias-border-l2,rgba(255,255,255,.14));color:var(--dsw-alias-label-tertiary,#8a8a91)}
+.pp-plan-asks{display:flex;flex-direction:column;gap:7px;min-width:0}
+.pp-plan-ask{display:flex;flex-direction:column;gap:5px;min-width:0}
+.pp-plan-q{color:var(--dsw-alias-label-primary,#f2f2f5);font-size:12px;line-height:18px}
+.pp-plan-seg{display:flex;flex-wrap:wrap;align-self:flex-start;max-width:100%}
+.pp-plan-opt{box-sizing:border-box;max-width:100%;padding:1px 10px;margin:0 0 0 -.5px;border:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-radius:0;background:transparent;color:var(--dsw-alias-label-secondary,#a9a9b0);font:inherit;font-size:12px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.pp-plan-opt:first-child{margin-left:0;border-radius:7px 0 0 7px}
+.pp-plan-opt:last-child{border-radius:0 7px 7px 0}
+.pp-plan-opt:only-child{border-radius:7px}
+.pp-plan-opt:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(255,255,255,.08));color:var(--dsw-alias-label-primary,#f2f2f5)}
+.pp-plan-opt[data-rec="true"]{position:relative;padding-left:19px;color:var(--dsw-alias-label-primary,#f2f2f5)}
+.pp-plan-opt[data-rec="true"]::before{content:"★";position:absolute;left:7px;top:1px;font-size:9px;line-height:18px;color:var(--dsw-alias-state-business-primary,#a8c7fa)}
+.pp-plan-opt[data-selected="true"],.pp-plan-opt[data-selected="true"]:hover{background:var(--dsw-alias-state-business-primary,#a8c7fa);border-color:var(--dsw-alias-state-business-primary,#a8c7fa);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font-weight:500}
+.pp-plan-opt[data-selected="true"]::after{content:"✓";margin-left:5px;font-size:10px}
+.pp-plan-opt[data-selected="true"][data-rec="true"]::before{color:var(--dsw-alias-label-primary-inverted,#0b0b0d)}
+.pp-plan-opt:focus{outline:none}
+.pp-plan-opt:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#a8c7fa);outline-offset:-1px}
+.pp-plan-foot{display:flex;align-items:center;gap:10px;min-width:0;padding-top:6px;border-top:.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14))}
+.pp-plan-notes{min-width:0;color:var(--dsw-alias-label-tertiary,#8a8a91);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pp-plan-progress{flex:none;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8a8a91);white-space:nowrap}
+.pp-plan-confirm{box-sizing:border-box;flex:none;padding:1px 12px;border:.5px solid var(--dsw-alias-state-business-primary,#a8c7fa);border-radius:7px;background:var(--dsw-alias-state-business-primary,#a8c7fa);color:var(--dsw-alias-label-primary-inverted,#0b0b0d);font:inherit;font-size:12px;font-weight:500;line-height:18px;cursor:pointer}
+.pp-plan-confirm:hover:not(:disabled){filter:brightness(1.08)}
+.pp-plan-confirm:disabled{background:transparent;border-color:var(--dsw-alias-border-l2,rgba(255,255,255,.14));color:var(--dsw-alias-label-tertiary,#8a8a91);cursor:default}
 .pp-plan-confirm:focus{outline:none}
-.pp-plan-confirm:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}
-.pp-plan-notes{color:var(--dsw-alias-label-tertiary,#8a8a91);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pp-plan-busy{flex-direction:row;align-items:center;flex-wrap:wrap;gap:8px;color:var(--dsw-alias-label-tertiary,#8a8a91)}
+.pp-plan-confirm:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#a8c7fa);outline-offset:1px}
+.pp-plan-busy{flex-direction:column;align-items:stretch;gap:6px}
+.pp-plan-busy-line{display:flex;align-items:center;gap:8px;min-width:0;color:var(--dsw-alias-label-secondary,#a9a9b0)}
+.pp-plan-spinner{box-sizing:border-box;flex:none;width:10px;height:10px;border:1.5px solid var(--dsw-alias-border-l2,rgba(255,255,255,.14));border-top-color:var(--dsw-alias-state-business-primary,#a8c7fa);border-radius:50%;animation:pp-plan-spin .8s linear infinite}
+@keyframes pp-plan-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.pp-plan-spinner{animation:none}}
 `
     //#endregion
 
@@ -1396,13 +1410,28 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
           h(
             'div',
             { className: 'pp-plan pp-plan-busy', role: 'status', 'aria-busy': 'true', 'data-phase': 'refining' },
-            h('span', { className: 'pp-plan-busy-text' }, t('dock.refining')),
-            chips.map((item, index) => h('span', {
-              key: index,
-              className: 'pp-plan-chip',
-              'data-disabled': 'true',
-              title: `${item.slot}=${item.value}`,
-            }, `${item.slot}=${item.value}`)),
+            h(
+              'div',
+              { className: 'pp-plan-busy-line' },
+              h('span', { className: 'pp-plan-spinner', 'aria-hidden': 'true' }),
+              h('span', { className: 'pp-plan-busy-text' }, t('dock.refining')),
+            ),
+            chips.length === 0 ? null : h(
+              'div',
+              { className: 'pp-plan-row' },
+              h('span', { className: 'pp-plan-tag' }, t('dock.assumptions')),
+              h('span', { className: 'pp-plan-chips' }, chips.map((item, index) => h(
+                'span',
+                {
+                  key: index,
+                  className: 'pp-plan-chip',
+                  'data-disabled': 'true',
+                  title: `${item.slot}：${item.value}`,
+                },
+                h('span', { className: 'pp-plan-chip-k' }, item.slot),
+                h('span', { className: 'pp-plan-chip-v' }, item.value),
+              ))),
+            ),
           ),
         )
       }
@@ -1416,13 +1445,12 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
       const assumptions = plan.assumptions
       const typeLabel = plan.type !== '' && PLAN_TYPES.has(plan.type) ? t(`dock.type.${plan.type}`) : ''
 
-      // Header key by (type known?, assumptions shown?), then the pending suffix: one
-      // lookup instead of a branch ladder, so a new variant is a single row.
-      const titleKey = typeLabel === ''
-        ? (assumptions.length > 0 ? 'dock.title.plain' : 'dock.title.short.plain')
-        : (assumptions.length > 0 ? 'dock.title' : 'dock.title.short')
-      let title = t(titleKey, { type: typeLabel, count: assumptions.length })
-      if (questions.length > 0) title += t('dock.pending', { count: questions.length })
+      // One short line instead of a sentence: the type is a badge of its own, and the two
+      // counts are what the user actually scans for.
+      const summary = [
+        assumptions.length > 0 ? t('dock.summary.filled', { count: assumptions.length }) : '',
+        questions.length > 0 ? t('dock.summary.pending', { count: questions.length }) : '',
+      ].filter((part) => part !== '').join(' · ')
 
       const close = () => {
         if (store !== null) store.hidePlan(sessionId)
@@ -1445,17 +1473,21 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
         })
       }
 
+      const progress = t('dock.progress', { done: chosen.length, total: questions.length })
+      const notesText = plan.notes === '' ? '' : t('dock.notes', { notes: plan.notes })
+
       return h(
         React.Fragment,
         null,
         h('style', null, PLAN_CSS),
         h(
           'div',
-          { className: 'pp-plan', 'data-phase': 'done', role: 'group', 'aria-label': title },
+          { className: 'pp-plan', 'data-phase': 'done', role: 'group', 'aria-label': summary },
           h(
             'div',
             { className: 'pp-plan-head' },
-            h('span', { className: 'pp-plan-title', title }, title),
+            typeLabel === '' ? null : h('span', { className: 'pp-plan-type' }, typeLabel),
+            h('span', { className: 'pp-plan-summary' }, summary),
             h(
               'button',
               {
@@ -1476,69 +1508,68 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
             'div',
             { className: 'pp-plan-row' },
             h('span', { className: 'pp-plan-tag' }, t('dock.assumptions')),
-            h('span', { className: 'pp-plan-chips' }, assumptions.map((item, index) => h('span', {
-              key: index,
-              className: 'pp-plan-chip',
-              title: `${item.slot}=${item.value}`,
-            }, `${item.slot}=${item.value}`))),
+            h('span', { className: 'pp-plan-chips' }, assumptions.map((item, index) => h(
+              'span',
+              {
+                key: index,
+                className: 'pp-plan-chip',
+                title: `${item.slot}：${item.value}`,
+              },
+              h('span', { className: 'pp-plan-chip-k' }, item.slot),
+              h('span', { className: 'pp-plan-chip-v' }, item.value),
+            ))),
           ),
           questions.length === 0 ? null : h(
             'div',
             { className: 'pp-plan-row' },
             h('span', { className: 'pp-plan-tag' }, t('dock.questions')),
-            h('div', { className: 'pp-plan-questions' }, [
-              ...questions.map((item, index) => h(
-                'div',
-                { className: 'pp-plan-question', key: index },
-                h('span', { className: 'pp-plan-q' }, item.q),
-                // options[0] is the Host's recommendation; the badge labels it, never replaces it.
-                item.options.map((option, optionIndex) => h(
-                  React.Fragment,
-                  { key: optionIndex },
-                  optionIndex === 0 ? h('span', { className: 'pp-plan-recommended' }, t('dock.recommended')) : null,
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'pp-plan-option',
-                      title: option,
-                      // Selection, not submission: the answer only leaves on 确认.
-                      'aria-pressed': selection[item.q] === option ? 'true' : 'false',
-                      'data-selected': selection[item.q] === option ? 'true' : 'false',
-                      onMouseDown: (event) => {
-                        event.preventDefault()
-                      },
-                      onClick: () => toggleOption(item.q, option),
-                    },
-                    option,
-                  ),
-                )),
-              )),
-              // One confirm for the whole panel: it stays disabled until something is chosen.
-              h(
-                'div',
-                { className: 'pp-plan-confirm-row', key: 'confirm' },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'pp-plan-confirm',
-                    disabled: chosen.length === 0,
-                    title: chosen.length === 0 ? t('dock.confirm.empty') : t('dock.confirm'),
-                    onMouseDown: (event) => {
-                      event.preventDefault()
-                    },
-                    onClick: confirm,
+            h('div', { className: 'pp-plan-asks' }, questions.map((item, index) => h(
+              'div',
+              { className: 'pp-plan-ask', key: index },
+              h('span', { className: 'pp-plan-q' }, item.q),
+              // One bordered group per question: a row of answers, not a pile of buttons.
+              // options[0] is the Host's recommendation, marked with a ★ INSIDE the option so
+              // the badge never competes with the answers for reading order.
+              h('div', { className: 'pp-plan-seg' }, item.options.map((option, optionIndex) => h(
+                'button',
+                {
+                  key: optionIndex,
+                  type: 'button',
+                  className: 'pp-plan-opt',
+                  'data-rec': optionIndex === 0 ? 'true' : 'false',
+                  title: optionIndex === 0 ? `${option} · ${t('dock.recommended')}` : option,
+                  // Selection, not submission: the answer only leaves on 确认.
+                  'aria-pressed': selection[item.q] === option ? 'true' : 'false',
+                  'data-selected': selection[item.q] === option ? 'true' : 'false',
+                  onMouseDown: (event) => {
+                    event.preventDefault()
                   },
-                  chosen.length === 0 ? t('dock.confirm') : t('dock.confirm.count', { count: chosen.length }),
-                ),
-              ),
-            ]),
+                  onClick: () => toggleOption(item.q, option),
+                },
+                option,
+              ))),
+            ))),
           ),
-          plan.notes === '' ? null : h(
+          notesText === '' && questions.length === 0 ? null : h(
             'div',
-            { className: 'pp-plan-notes' },
-            t('dock.notes', { notes: plan.notes }),
+            { className: 'pp-plan-foot' },
+            notesText === '' ? null : h('span', { className: 'pp-plan-notes', title: notesText }, notesText),
+            questions.length === 0 ? null : h('span', { className: 'pp-plan-progress' }, progress),
+            // One primary action for the whole panel: it stays disabled until something is chosen.
+            questions.length === 0 ? null : h(
+              'button',
+              {
+                type: 'button',
+                className: 'pp-plan-confirm',
+                disabled: chosen.length === 0,
+                title: chosen.length === 0 ? t('dock.confirm.empty') : t('dock.confirm'),
+                onMouseDown: (event) => {
+                  event.preventDefault()
+                },
+                onClick: confirm,
+              },
+              chosen.length === 0 ? t('dock.confirm') : t('dock.confirm.count', { count: chosen.length }),
+            ),
           ),
         ),
       )
@@ -1574,17 +1605,15 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'error.timeout': '优化超时，请重试',
                 'error.generic': '优化失败，请重试',
                 // v2 diagnostic panel (`conversation.input.dock`).
-                'dock.title': '已按「{type}」补全 {count} 处',
-                'dock.title.plain': '已补全 {count} 处',
-                'dock.title.short': '已按「{type}」改写',
-                'dock.title.short.plain': '已改写',
-                'dock.pending': ' · {count} 个待确认',
+                'dock.summary.filled': '补全 {count} 处',
+                'dock.summary.pending': '待确认 {count}',
                 'dock.assumptions': '补全',
                 'dock.questions': '待确认',
                 'dock.notes': '改动：{notes}',
                 'dock.close': '收起诊断',
-                'dock.refining': '按你的选择重写…',
+                'dock.refining': '正在按你的选择重写…',
                 'dock.recommended': '推荐',
+                'dock.progress': '已选 {done}/{total}',
                 'dock.confirm': '确认并重写',
                 'dock.confirm.count': '确认并重写（{count}）',
                 'dock.confirm.empty': '先选一个答案，再确认',
@@ -1602,17 +1631,15 @@ background:color-mix(in srgb,var(--dsw-specific-input-major,#1f1f22) 94%,var(--d
                 'error.timeout': 'Polishing timed out, please retry',
                 'error.generic': 'Could not polish the prompt, please retry',
                 // v2 diagnostic panel (`conversation.input.dock`).
-                'dock.title': 'Filled in {count} gap(s) for a "{type}" prompt',
-                'dock.title.plain': 'Filled in {count} gap(s)',
-                'dock.title.short': 'Rewritten as a "{type}" prompt',
-                'dock.title.short.plain': 'Rewritten',
-                'dock.pending': ' · {count} to confirm',
-                'dock.assumptions': 'Added',
+                'dock.summary.filled': 'Filled {count}',
+                'dock.summary.pending': '{count} to confirm',
+                'dock.assumptions': 'Filled',
                 'dock.questions': 'Confirm',
                 'dock.notes': 'Changed: {notes}',
                 'dock.close': 'Hide diagnostics',
                 'dock.refining': 'Rewriting with your choices…',
                 'dock.recommended': 'Suggested',
+                'dock.progress': 'Picked {done}/{total}',
                 'dock.confirm': 'Confirm and rewrite',
                 'dock.confirm.count': 'Confirm and rewrite ({count})',
                 'dock.confirm.empty': 'Pick an answer first, then confirm',
