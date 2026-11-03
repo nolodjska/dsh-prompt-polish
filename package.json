@@ -1,9 +1,9 @@
 {
   "name": "@local/prompt-polish",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Composer prompt-polish button: rewrites the draft prompt with the session's own model and context, then offers undo.",
+  "description": "Composer prompt-polish button: rewrites the draft prompt with the session's own model and context, shows what it filled in, asks at most 3 bounded questions, and offers undo.",
   "license": "MIT",
   "repository": {
     "type": "git",
